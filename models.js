@@ -1,19 +1,22 @@
 const mongoose = require('mongoose');
+
 const user = new mongoose.Schema({
   uid: {type: Number, unique: true},
   balance: {type: Number, default: 0},
   refEarn: {type: Number, default: 0},
-  ref: Number,
-  ref2: Number,
-  lastBonus: Number
+  ref: Number, // кто пригласил
+  ref2: Number, // дед
+  lastBonus: Number,
+  totalDeposited: {type: Number, default: 0}
 }, {versionKey: false});
 
 const invoice = new mongoose.Schema({
   iid: String,
   uid: Number,
-  bet: Number,
-  side: String,
-  status: {type: String, default: 'pending'}
+  amount: Number,
+  type: {type: String, enum: ['deposit', 'withdraw', 'bet']},
+  status: {type: String, default: 'pending'},
+  refCode: Number
 }, {versionKey: false});
 
 const slotRound = new mongoose.Schema({
