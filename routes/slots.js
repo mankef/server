@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
 const { SlotRound, User } = require('../models');
 
 const SYMBOLS = ['🍒', '🍋', '🔔', 'BAR', '💰'];
@@ -17,33 +16,47 @@ function getStop() {
   return 0;
 }
 
+// Старт спина (списываем с баланса)
 router.post('/slots/spin', async (req, res) => {
   const {uid, bet} = req.body;
   const user = await User.findOne({uid});
-  if (!user || user.balance < bet) return res.status(400).json({error: 'Insufficient balance'});
   
-  // Создаём invoice для проверки оплаты (но списываем с баланса сразу)
-  const {data} = await axios.post('https://pay.crypt.bot/api/createInvoice', {
-    asset: 'USDT', amount: String(bet), description: `Slots ${bet} USDT`
-  }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
+  if (!user || user.balance < bet) {
+    return res.status(400).json({error: 'Insufficient balance'});
+  }
   
-  const round = await SlotRound.create({uid, bet, invoiceId: data.result.invoice_id});
-  res.json({invoiceUrl: data.result.pay_url, roundId: round._id});
+  // Списываем ставку
+  user.balance -= bet;
+  await user.save();
+  
+  // Создаём раунд
+  const round = await SlotRound.create({uid, bet, reels: []});
+  
+  res.json({success: true, roundId: round._id});
 });
 
+// Остановка барабана
 router.get('/slots/stop', async (req, res) => {
   const {roundId, reel} = req.query;
   const r = await SlotRound.findById(roundId);
-  if (!r.reels[reel]) { r.reels[reel] = Array.from({length: 3}, () => getStop()); await r.save(); }
+  if (!r.reels[reel]) {
+    r.reels[reel] = Array.from({length: 3}, () => getStop());
+    await r.save();
+  }
   res.json({stopRow: r.reels[reel]});
 });
 
+// Подсчёт выигрыша и начисление
 router.get('/slots/win', async (req, res) => {
   const r = await SlotRound.findById(req.query.roundId);
-  if (!r.paid) return res.json({win: false});
+  if (r.finished) return res.json({win: false});
   
   const grid = [];
-  for (let reel = 0; reel < 3; reel++) for (let row = 0; row < 3; row++) grid.push(SYMBOLS[r.reels[reel][row]]);
+  for (let reel = 0; reel < 3; reel++) {
+    for (let row = 0; row < 3; row++) {
+      grid.push(SYMBOLS[r.reels[reel][row]]);
+    }
+  }
   
   let total = 0;
   const lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 4, 8], [2, 4, 6]];
@@ -53,14 +66,25 @@ router.get('/slots/win', async (req, res) => {
     if (PAYTABLE[key]) total += r.bet * PAYTABLE[key];
   });
   
+  r.win = total;
+  r.finished = true;
+  await r.save();
+  
   if (total > 0) {
     await User.updateOne({uid: r.uid}, {$inc: {balance: total}});
-    // Мгновенный вывод выигрыша
-    await axios.post('https://pay.crypt.bot/api/transfer', {
-      user_id: r.uid, asset: 'USDT', amount: String(total.toFixed(2)), spend_id: 'slot' + r._id
-    }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
+    // Реферальные 1% от выигрыша
+    const user = await User.findOne({uid: r.uid});
+    if (user.ref) {
+      const ref1 = await User.findOne({uid: user.ref});
+      if (ref1) {
+        const ref1Bonus = total * 0.01;
+        ref1.refEarn += ref1Bonus;
+        ref1.balance += ref1Bonus;
+        await ref1.save();
+      }
+    }
   }
   
-  res.json({win: total > 0, multi: total / r.bet});
+  res.json({win: total > 0, multi: total / r.bet, newBalance: user.balance});
 });
 module.exports = router;
