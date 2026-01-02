@@ -4,8 +4,8 @@ const user = new mongoose.Schema({
   uid: {type: Number, unique: true},
   balance: {type: Number, default: 0},
   refEarn: {type: Number, default: 0},
-  ref: Number, // кто пригласил
-  ref2: Number, // дед
+  ref: Number,
+  ref2: Number,
   lastBonus: Number,
   totalDeposited: {type: Number, default: 0}
 }, {versionKey: false});
@@ -14,7 +14,7 @@ const invoice = new mongoose.Schema({
   iid: String,
   uid: Number,
   amount: Number,
-  type: {type: String, enum: ['deposit', 'withdraw', 'bet']},
+  type: {type: String, enum: ['deposit', 'withdraw']},
   status: {type: String, default: 'pending'},
   refCode: Number
 }, {versionKey: false});
@@ -22,9 +22,9 @@ const invoice = new mongoose.Schema({
 const slotRound = new mongoose.Schema({
   uid: Number,
   bet: Number,
-  invoiceId: String,
   reels: [],
-  paid: {type: Boolean, default: false}
+  win: Number,
+  finished: {type: Boolean, default: false}
 }, {versionKey: false});
 
 module.exports = {
