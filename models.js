@@ -27,8 +27,13 @@ const slotRound = new mongoose.Schema({
   finished: {type: Boolean, default: false}
 }, {versionKey: false});
 
+const settings = new mongoose.Schema({
+  houseEdge: {type: Number, default: 0.05}
+}, {versionKey: false});
+
 module.exports = {
   User: mongoose.model('User', user),
   Invoice: mongoose.model('Invoice', invoice),
-  SlotRound: mongoose.model('SlotRound', slotRound)
+  SlotRound: mongoose.model('SlotRound', slotRound),
+  Settings: mongoose.model('Settings', settings, 'settings')
 };
