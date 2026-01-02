@@ -16,7 +16,7 @@ function getStop() {
   return 0;
 }
 
-// Старт спина (списываем с баланса)
+// Запуск спина (списываем с баланса)
 router.post('/slots/spin', async (req, res) => {
   const {uid, bet} = req.body;
   const user = await User.findOne({uid});
@@ -29,13 +29,15 @@ router.post('/slots/spin', async (req, res) => {
   await user.save();
   
   const round = await SlotRound.create({uid, bet, reels: []});
-  res.json({success: true, roundId: round._id});
+  res.json({success: true, roundId: round._id, newBalance: user.balance});
 });
 
 // Остановка барабана
 router.get('/slots/stop', async (req, res) => {
   const {roundId, reel} = req.query;
   const r = await SlotRound.findById(roundId);
+  if (!r) return res.status(404).json({error: 'Round not found'});
+  
   if (!r.reels[reel]) {
     r.reels[reel] = Array.from({length: 3}, () => getStop());
     await r.save();
@@ -43,10 +45,10 @@ router.get('/slots/stop', async (req, res) => {
   res.json({stopRow: r.reels[reel]});
 });
 
-// Подсчёт выигрыша
+// Результат
 router.get('/slots/win', async (req, res) => {
   const r = await SlotRound.findById(req.query.roundId);
-  if (r.finished) return res.json({win: false});
+  if (!r || r.finished) return res.json({win: false});
   
   const grid = [];
   for (let reel = 0; reel < 3; reel++) {
@@ -86,4 +88,5 @@ router.get('/slots/win', async (req, res) => {
   
   res.json({win: total > 0, multi: total / r.bet, newBalance: user.balance});
 });
+
 module.exports = router;
