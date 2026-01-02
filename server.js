@@ -107,24 +107,31 @@ app.post('/play/coin', async (req, res) => {
   });
 });
 
-// Webhook для пополнений
+// Webhook для пополнений (ГЛАВНЫЙ ЭНДПОИНТ)
 app.post('/webhook', async (req, res) => {
   console.log('[SERVER] Webhook received:', req.body.update?.type);
   
   if (req.body.update?.type !== 'invoice_paid') return res.sendStatus(200);
   
   const {invoice_id} = req.body.update.payload;
+  console.log('[SERVER] Processing invoice:', invoice_id);
+  
   const inv = await Invoice.findOne({iid: invoice_id});
-  if (!inv) return res.sendStatus(200);
+  if (!inv) {
+    console.log('[SERVER] Invoice not found in DB:', invoice_id);
+    return res.sendStatus(200);
+  }
   
   if (inv.type === 'deposit' && inv.status === 'pending') {
+    console.log('[SERVER] Processing deposit for user:', inv.uid, 'amount:', inv.amount);
+    
     const user = await User.findOneAndUpdate(
       {uid: inv.uid},
       {$inc: {balance: inv.amount, totalDeposited: inv.amount}},
       {upsert: true, new: true}
     );
     
-    // Реферальные от депозита
+    // Реферальные
     if (inv.refCode && inv.refCode !== inv.uid) {
       const ref1 = await User.findOne({uid: inv.refCode});
       if (ref1) {
@@ -147,7 +154,7 @@ app.post('/webhook', async (req, res) => {
     
     inv.status = 'paid';
     await inv.save();
-    console.log(`[SERVER] Deposit processed: user ${inv.uid}, amount ${inv.amount}`);
+    console.log('[SERVER] Deposit processed successfully');
   }
   
   res.sendStatus(200);
@@ -171,6 +178,21 @@ app.post('/bonus', async (req, res) => {
   const {uid, now} = req.body;
   await User.updateOne({uid}, {lastBonus: now, $inc: {balance: 0.2}});
   res.sendStatus(200);
+});
+
+// Автоматическая настройка вебхука
+app.get('/setup-webhook', async (req, res) => {
+  if (!CRYPTO_TOKEN) return res.status(500).json({error: 'No token'});
+  
+  try {
+    await axios.post('https://pay.crypt.bot/api/setWebhook', {
+      url: `${SERVER_URL}/webhook`
+    }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
+    
+    res.json({success: true, webhook: `${SERVER_URL}/webhook`});
+  } catch (e) {
+    res.status(500).json({error: e.message});
+  }
 });
 
 const PORT = process.env.PORT || 3000;
