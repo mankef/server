@@ -25,13 +25,10 @@ router.post('/slots/spin', async (req, res) => {
     return res.status(400).json({error: 'Insufficient balance'});
   }
   
-  // Списываем ставку
   user.balance -= bet;
   await user.save();
   
-  // Создаём раунд
   const round = await SlotRound.create({uid, bet, reels: []});
-  
   res.json({success: true, roundId: round._id});
 });
 
@@ -46,7 +43,7 @@ router.get('/slots/stop', async (req, res) => {
   res.json({stopRow: r.reels[reel]});
 });
 
-// Подсчёт выигрыша и начисление
+// Подсчёт выигрыша
 router.get('/slots/win', async (req, res) => {
   const r = await SlotRound.findById(req.query.roundId);
   if (r.finished) return res.json({win: false});
@@ -70,10 +67,12 @@ router.get('/slots/win', async (req, res) => {
   r.finished = true;
   await r.save();
   
+  const user = await User.findOne({uid: r.uid});
   if (total > 0) {
-    await User.updateOne({uid: r.uid}, {$inc: {balance: total}});
+    user.balance += total;
+    await user.save();
+    
     // Реферальные 1% от выигрыша
-    const user = await User.findOne({uid: r.uid});
     if (user.ref) {
       const ref1 = await User.findOne({uid: user.ref});
       if (ref1) {
