@@ -153,7 +153,7 @@ app.post('/withdraw', async (req, res) => {
     await user.save();
     
     // ✅ ССЫЛКА НА ЧЕК (открывается в Telegram)
-    const checkLink = `https://t.me/CryptoBot?start=chk_${data.result.check_id}`;
+    const checkLink = `https://t.me/CryptoBot?start=_${data.result.check_id}`;
     
     res.json({success: true, newBalance: user.balance.toFixed(2), checkLink});
   } catch (e) {
@@ -228,3 +228,4 @@ app.post('/bonus', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
+
