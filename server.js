@@ -6,15 +6,24 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 mongoose.connect(process.env.MONGO_URI);
-const { User, Invoice } = require('./models');
+const { User, Invoice, Settings } = require('./models');
 const slotsRouter = require('./routes/slots');
+const adminRouter = require('./routes/admin');
 const fair = require('./utils/fair');
 const axios = require('axios');
 
 const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
 const SERVER_URL = process.env.SERVER_URL || `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
 app.use('/', slotsRouter);
+app.use('/admin', adminRouter);
+
+// Тестовый эндпоинт
+app.post('/test-webhook', (req, res) => {
+  console.log('[SERVER] Test webhook:', req.body);
+  res.json({received: true});
+});
 
 // Регистрация
 app.post('/user/register', async (req, res) => {
@@ -47,7 +56,7 @@ app.post('/deposit', async (req, res) => {
     refCode
   });
   
-  res.json({invoiceUrl: data.result.pay_url});
+  res.json({invoiceUrl: data.result.pay_url, invoiceId: data.result.invoice_id});
 });
 
 // Вывод
@@ -60,14 +69,17 @@ app.post('/withdraw', async (req, res) => {
   }
   
   const spend_id = 'withdraw' + uid + Date.now();
-  await axios.post('https://pay.crypt.bot/api/transfer', {
+  const {data} = await axios.post('https://pay.crypt.bot/api/transfer', {
     user_id: uid, asset: 'USDT', amount: String(amount.toFixed(2)), spend_id
   }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
   
   user.balance -= amount;
   await user.save();
   
-  res.json({success: true, newBalance: user.balance.toFixed(2)});
+  // Ссылка на чек
+  const checkUrl = `https://pay.crypt.bot/invoice/${data.result.invoice_id}`;
+  
+  res.json({success: true, newBalance: user.balance.toFixed(2), checkUrl});
 });
 
 // Игра монетка
@@ -80,10 +92,11 @@ app.post('/play/coin', async (req, res) => {
   }
   
   const {serverSeed, hash} = fair.generateRound();
-  const {win} = fair.calculateWin(serverSeed, clientSeed);
+  const settings = await Settings.findOne();
+  const {win} = fair.calculateWin(serverSeed, clientSeed, settings?.houseEdge || 0.05);
   
   user.balance -= betAmount;
-  const prize = win ? betAmount * 1.9 : 0;
+  const prize = win ? betAmount * (1.9 - (settings?.houseEdge || 0.05)) : 0;
   user.balance += prize;
   await user.save();
   
@@ -107,18 +120,16 @@ app.post('/play/coin', async (req, res) => {
   });
 });
 
-// Webhook для пополнений (ГЛАВНЫЙ ЭНДПОИНТ)
+// Webhook для пополнений
 app.post('/webhook', async (req, res) => {
-  console.log('[SERVER] Webhook received:', req.body.update?.type);
+  console.log('[SERVER] Webhook received:', req.body.update?.type, req.body.update?.payload?.invoice_id);
   
   if (req.body.update?.type !== 'invoice_paid') return res.sendStatus(200);
   
   const {invoice_id} = req.body.update.payload;
-  console.log('[SERVER] Processing invoice:', invoice_id);
-  
   const inv = await Invoice.findOne({iid: invoice_id});
   if (!inv) {
-    console.log('[SERVER] Invoice not found in DB:', invoice_id);
+    console.log('[SERVER] Invoice not in DB:', invoice_id);
     return res.sendStatus(200);
   }
   
@@ -154,10 +165,21 @@ app.post('/webhook', async (req, res) => {
     
     inv.status = 'paid';
     await inv.save();
-    console.log('[SERVER] Deposit processed successfully');
+    console.log('[SERVER] Deposit processed');
   }
   
   res.sendStatus(200);
+});
+
+// Проверка статуса платежа (ручная)
+app.post('/check-payment', async (req, res) => {
+  const {invoiceId} = req.body;
+  if (!invoiceId) return res.status(400).json({error: 'No invoice ID'});
+  
+  const inv = await Invoice.findOne({iid: invoiceId});
+  if (!inv) return res.status(404).json({error: 'Invoice not found'});
+  
+  res.json({status: inv.status, amount: inv.amount});
 });
 
 // Данные пользователя
@@ -176,22 +198,26 @@ app.get('/user/:uid', async (req, res) => {
 // Бонус
 app.post('/bonus', async (req, res) => {
   const {uid, now} = req.body;
-  await User.updateOne({uid}, {lastBonus: now, $inc: {balance: 0.2}});
+  await User.updateOne({uid}, {lastBonus: now});
   res.sendStatus(200);
 });
 
-// Автоматическая настройка вебхука
+// Настройка вебхука
 app.get('/setup-webhook', async (req, res) => {
   if (!CRYPTO_TOKEN) return res.status(500).json({error: 'No token'});
   
   try {
+    const webhookUrl = `${SERVER_URL}/webhook`;
+    console.log('[SERVER] Setting webhook:', webhookUrl);
+    
     await axios.post('https://pay.crypt.bot/api/setWebhook', {
-      url: `${SERVER_URL}/webhook`
+      url: webhookUrl
     }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
     
-    res.json({success: true, webhook: `${SERVER_URL}/webhook`});
+    res.json({success: true, webhook: webhookUrl});
   } catch (e) {
-    res.status(500).json({error: e.message});
+    console.error('[SERVER] Setup webhook error:', e.message);
+    res.status(500).json({error: e.message, details: e.response?.data});
   }
 });
 
