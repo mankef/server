@@ -76,9 +76,7 @@ app.post('/withdraw', async (req, res) => {
   user.balance -= amount;
   await user.save();
   
-  // Ссылка на чек
   const checkUrl = `https://pay.crypt.bot/invoice/${data.result.invoice_id}`;
-  
   res.json({success: true, newBalance: user.balance.toFixed(2), checkUrl});
 });
 
@@ -120,22 +118,16 @@ app.post('/play/coin', async (req, res) => {
   });
 });
 
-// Webhook для пополнений
+// Webhook
 app.post('/webhook', async (req, res) => {
-  console.log('[SERVER] Webhook received:', req.body.update?.type, req.body.update?.payload?.invoice_id);
-  
+  console.log('[SERVER] Webhook:', req.body.update?.type, req.body.update?.payload?.invoice_id);
   if (req.body.update?.type !== 'invoice_paid') return res.sendStatus(200);
   
   const {invoice_id} = req.body.update.payload;
   const inv = await Invoice.findOne({iid: invoice_id});
-  if (!inv) {
-    console.log('[SERVER] Invoice not in DB:', invoice_id);
-    return res.sendStatus(200);
-  }
+  if (!inv) return res.sendStatus(200);
   
   if (inv.type === 'deposit' && inv.status === 'pending') {
-    console.log('[SERVER] Processing deposit for user:', inv.uid, 'amount:', inv.amount);
-    
     const user = await User.findOneAndUpdate(
       {uid: inv.uid},
       {$inc: {balance: inv.amount, totalDeposited: inv.amount}},
@@ -171,7 +163,7 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Проверка статуса платежа (ручная)
+// Проверка платежа
 app.post('/check-payment', async (req, res) => {
   const {invoiceId} = req.body;
   if (!invoiceId) return res.status(400).json({error: 'No invoice ID'});
