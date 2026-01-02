@@ -11,9 +11,12 @@ const slotsRouter = require('./routes/slots');
 const fair = require('./utils/fair');
 const axios = require('axios');
 
+const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
+const SERVER_URL = process.env.SERVER_URL || `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+
 app.use('/', slotsRouter);
 
-// Регистрация + реферал
+// Регистрация
 app.post('/user/register', async (req, res) => {
   const {uid, refCode} = req.body;
   const user = await User.findOneAndUpdate({uid}, {}, {upsert: true, new: true});
@@ -29,12 +32,12 @@ app.post('/user/register', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Пополнение (создаём invoice)
+// Пополнение
 app.post('/deposit', async (req, res) => {
   const {uid, amount, refCode} = req.body;
   const {data} = await axios.post('https://pay.crypt.bot/api/createInvoice', {
     asset: 'USDT', amount: String(amount), description: `Deposit ${amount} USDT`
-  }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
+  }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
   
   await Invoice.create({
     iid: data.result.invoice_id,
@@ -59,7 +62,7 @@ app.post('/withdraw', async (req, res) => {
   const spend_id = 'withdraw' + uid + Date.now();
   await axios.post('https://pay.crypt.bot/api/transfer', {
     user_id: uid, asset: 'USDT', amount: String(amount.toFixed(2)), spend_id
-  }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
+  }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
   
   user.balance -= amount;
   await user.save();
@@ -67,7 +70,7 @@ app.post('/withdraw', async (req, res) => {
   res.json({success: true, newBalance: user.balance.toFixed(2)});
 });
 
-// Игра с баланса (честная монетка)
+// Игра монетка
 app.post('/play/coin', async (req, res) => {
   const {uid, betAmount, side, clientSeed} = req.body;
   const user = await User.findOne({uid});
@@ -104,23 +107,24 @@ app.post('/play/coin', async (req, res) => {
   });
 });
 
-// Webhook для депозитов
+// Webhook для пополнений
 app.post('/webhook', async (req, res) => {
-  const {update} = req.body;
-  if (update?.type !== 'invoice_paid') return res.sendStatus(200);
+  console.log('[SERVER] Webhook received:', req.body.update?.type);
   
-  const {invoice_id} = update.payload;
+  if (req.body.update?.type !== 'invoice_paid') return res.sendStatus(200);
+  
+  const {invoice_id} = req.body.update.payload;
   const inv = await Invoice.findOne({iid: invoice_id});
   if (!inv) return res.sendStatus(200);
   
-  if (inv.type === 'deposit') {
+  if (inv.type === 'deposit' && inv.status === 'pending') {
     const user = await User.findOneAndUpdate(
       {uid: inv.uid},
       {$inc: {balance: inv.amount, totalDeposited: inv.amount}},
       {upsert: true, new: true}
     );
     
-    // Реферальные: 5% + 2%
+    // Реферальные от депозита
     if (inv.refCode && inv.refCode !== inv.uid) {
       const ref1 = await User.findOne({uid: inv.refCode});
       if (ref1) {
@@ -140,20 +144,18 @@ app.post('/webhook', async (req, res) => {
         }
       }
     }
+    
+    inv.status = 'paid';
+    await inv.save();
+    console.log(`[SERVER] Deposit processed: user ${inv.uid}, amount ${inv.amount}`);
   }
   
-  inv.status = 'paid';
-  await inv.save();
   res.sendStatus(200);
 });
 
 // Данные пользователя
 app.get('/user/:uid', async (req, res) => {
-  const u = await User.findOneAndUpdate(
-    {uid: +req.params.uid},
-    {},
-    {upsert: true, new: true}
-  );
+  const u = await User.findOneAndUpdate({uid: +req.params.uid}, {}, {upsert: true, new: true});
   res.json({
     balance: u.balance,
     refCode: u.uid,
@@ -164,5 +166,12 @@ app.get('/user/:uid', async (req, res) => {
   });
 });
 
+// Бонус
+app.post('/bonus', async (req, res) => {
+  const {uid, now} = req.body;
+  await User.updateOne({uid}, {lastBonus: now, $inc: {balance: 0.2}});
+  res.sendStatus(200);
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server on ' + PORT));
+app.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
