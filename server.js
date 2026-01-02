@@ -128,43 +128,36 @@ app.post('/check-deposit', async (req, res) => {
 app.post('/withdraw', async (req, res) => {
   const {uid, amount} = req.body;
   
-  // ВАЛИДАЦИЯ МИНИМУМА
   if (amount < 0.2) {
     return res.status(400).json({error: 'Minimum withdrawal is 0.20 USDT'});
   }
   
   const user = await User.findOne({uid});
-  
   if (!user || user.balance < amount) {
     return res.status(400).json({error: 'Insufficient balance'});
   }
   
   try {
     const spend_id = 'check' + uid + Date.now();
-    
-    // ✅ СОЗДАЁМ ЧЕК
     const {data} = await axios.post('https://pay.crypt.bot/api/createCheck', {
-      asset: 'USDT',
-      amount: String(amount.toFixed(2)),
-      spend_id
+      asset: 'USDT', amount: String(amount.toFixed(2)), spend_id
     }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
     
     user.balance -= amount;
     await user.save();
     
-    // ✅ ССЫЛКА НА ЧЕК (открывается в Telegram)
-    const checkLink = `https://t.me/CryptoBot?start=_${data.result.check_id}`;
+    // ✅ ПРАВИЛЬНАЯ ССЫЛКА: t.me/send?start=CHECK_ID
+    const checkLink = `https://t.me/send?start=${data.result.check_id}`;
     
-    res.json({success: true, newBalance: user.balance.toFixed(2), checkLink});
+    res.json({
+      success: true,
+      newBalance: user.balance.toFixed(2),
+      checkId: data.result.check_id,
+      checkLink
+    });
   } catch (e) {
     console.error('[SERVER] Create check error:', e.response?.data || e.message);
-    
-    if (e.response?.data?.error) {
-      const err = e.response.data.error;
-      res.status(400).json({error: `${err.name}: ${err.description || err.message}`});
-    } else {
-      res.status(500).json({error: 'Check creation failed'});
-    }
+    res.status(500).json({error: e.response?.data?.error?.name || 'Failed'});
   }
 });
 
@@ -228,4 +221,5 @@ app.post('/bonus', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
+
 
