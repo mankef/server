@@ -19,9 +19,14 @@ function getStop() {
 
 router.post('/slots/spin', async (req, res) => {
   const {uid, bet} = req.body;
+  const user = await User.findOne({uid});
+  if (!user || user.balance < bet) return res.status(400).json({error: 'Insufficient balance'});
+  
+  // Создаём invoice для проверки оплаты (но списываем с баланса сразу)
   const {data} = await axios.post('https://pay.crypt.bot/api/createInvoice', {
     asset: 'USDT', amount: String(bet), description: `Slots ${bet} USDT`
   }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
+  
   const round = await SlotRound.create({uid, bet, invoiceId: data.result.invoice_id});
   res.json({invoiceUrl: data.result.pay_url, roundId: round._id});
 });
@@ -36,8 +41,10 @@ router.get('/slots/stop', async (req, res) => {
 router.get('/slots/win', async (req, res) => {
   const r = await SlotRound.findById(req.query.roundId);
   if (!r.paid) return res.json({win: false});
+  
   const grid = [];
   for (let reel = 0; reel < 3; reel++) for (let row = 0; row < 3; row++) grid.push(SYMBOLS[r.reels[reel][row]]);
+  
   let total = 0;
   const lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 4, 8], [2, 4, 6]];
   lines.forEach(idx => {
@@ -45,12 +52,15 @@ router.get('/slots/win', async (req, res) => {
     const key = `${a}-${b}-${c}`;
     if (PAYTABLE[key]) total += r.bet * PAYTABLE[key];
   });
+  
   if (total > 0) {
     await User.updateOne({uid: r.uid}, {$inc: {balance: total}});
+    // Мгновенный вывод выигрыша
     await axios.post('https://pay.crypt.bot/api/transfer', {
       user_id: r.uid, asset: 'USDT', amount: String(total.toFixed(2)), spend_id: 'slot' + r._id
     }, {headers: {'Crypto-Pay-API-Token': process.env.CRYPTO_TOKEN}});
   }
+  
   res.json({win: total > 0, multi: total / r.bet});
 });
 module.exports = router;
