@@ -75,7 +75,6 @@ app.post('/check-deposit', async (req, res) => {
   if (inv.status === 'paid') return res.json({status: 'paid', amount: inv.amount, alreadyProcessed: true});
   
   try {
-    // Проверяем статус у CryptoBot
     const {data} = await axios.get('https://pay.crypt.bot/api/getInvoices', {
       params: {invoice_ids: invoiceId},
       headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}
@@ -84,7 +83,6 @@ app.post('/check-deposit', async (req, res) => {
     const invoice = data.result.items[0];
     if (!invoice) return res.json({status: 'not_found'});
     
-    // Если оплачен – начисляем
     if (invoice.status === 'paid') {
       const user = await User.findOneAndUpdate(
         {uid: inv.uid},
@@ -105,7 +103,7 @@ app.post('/check-deposit', async (req, res) => {
             const ref2 = await User.findOne({uid: ref1.ref});
             if (ref2) {
               const ref2Bonus = inv.amount * 0.02;
-              ref2.refEarn += ref2Bonus;
+                ref2.refEarn += ref2Bonus;
               ref2.balance += ref2Bonus;
               await ref2.save();
             }
@@ -126,9 +124,15 @@ app.post('/check-deposit', async (req, res) => {
   }
 });
 
-// ☑️ ВЫВОД С ЧЕКОМ
+// ☑️ ВЫВОД ЧЕКОМ (мин. 0.2 USDT)
 app.post('/withdraw', async (req, res) => {
   const {uid, amount} = req.body;
+  
+  // ВАЛИДАЦИЯ МИНИМУМА
+  if (amount < 0.2) {
+    return res.status(400).json({error: 'Minimum withdrawal is 0.20 USDT'});
+  }
+  
   const user = await User.findOne({uid});
   
   if (!user || user.balance < amount) {
@@ -136,19 +140,31 @@ app.post('/withdraw', async (req, res) => {
   }
   
   try {
-    const spend_id = 'withdraw' + uid + Date.now();
-    const {data} = await axios.post('https://pay.crypt.bot/api/transfer', {
-      user_id: uid, asset: 'USDT', amount: String(amount.toFixed(2)), spend_id
+    const spend_id = 'check' + uid + Date.now();
+    
+    // ✅ СОЗДАЁМ ЧЕК
+    const {data} = await axios.post('https://pay.crypt.bot/api/createCheck', {
+      asset: 'USDT',
+      amount: String(amount.toFixed(2)),
+      spend_id
     }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
     
     user.balance -= amount;
     await user.save();
     
-    const checkUrl = `https://pay.crypt.bot/invoice/${data.result.invoice_id}`;
-    res.json({success: true, newBalance: user.balance.toFixed(2), checkUrl});
+    // ✅ ССЫЛКА НА ЧЕК (открывается в Telegram)
+    const checkLink = `https://t.me/CryptoBot?start=chk_${data.result.check_id}`;
+    
+    res.json({success: true, newBalance: user.balance.toFixed(2), checkLink});
   } catch (e) {
-    console.error('[SERVER] Withdraw error:', e.response?.data || e.message);
-    res.status(500).json({error: 'Transfer failed'});
+    console.error('[SERVER] Create check error:', e.response?.data || e.message);
+    
+    if (e.response?.data?.error) {
+      const err = e.response.data.error;
+      res.status(400).json({error: `${err.name}: ${err.description || err.message}`});
+    } else {
+      res.status(500).json({error: 'Check creation failed'});
+    }
   }
 });
 
