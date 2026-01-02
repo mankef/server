@@ -6,21 +6,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 mongoose.connect(process.env.MONGO_URI);
-const { User, Invoice, SlotRound } = require('./models');
+const { User, Invoice } = require('./models');
 const slotsRouter = require('./routes/slots');
 const fair = require('./utils/fair');
 const axios = require('axios');
 
 app.use('/', slotsRouter);
 
-// Регистрация пользователя + реферал
+// Регистрация + реферал
 app.post('/user/register', async (req, res) => {
   const {uid, refCode} = req.body;
-  const user = await User.findOneAndUpdate(
-    {uid},
-    {},
-    {upsert: true, new: true}
-  );
+  const user = await User.findOneAndUpdate({uid}, {}, {upsert: true, new: true});
   
   if (refCode && !user.ref && refCode !== uid) {
     const refUser = await User.findOne({uid: refCode});
@@ -33,7 +29,7 @@ app.post('/user/register', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Пополнение баланса
+// Пополнение (создаём invoice)
 app.post('/deposit', async (req, res) => {
   const {uid, amount, refCode} = req.body;
   const {data} = await axios.post('https://pay.crypt.bot/api/createInvoice', {
@@ -51,7 +47,7 @@ app.post('/deposit', async (req, res) => {
   res.json({invoiceUrl: data.result.pay_url});
 });
 
-// Вывод средств
+// Вывод
 app.post('/withdraw', async (req, res) => {
   const {uid, amount} = req.body;
   const user = await User.findOne({uid});
@@ -71,7 +67,7 @@ app.post('/withdraw', async (req, res) => {
   res.json({success: true, newBalance: user.balance.toFixed(2)});
 });
 
-// Игра с баланса (монетка)
+// Игра с баланса (честная монетка)
 app.post('/play/coin', async (req, res) => {
   const {uid, betAmount, side, clientSeed} = req.body;
   const user = await User.findOne({uid});
@@ -83,16 +79,12 @@ app.post('/play/coin', async (req, res) => {
   const {serverSeed, hash} = fair.generateRound();
   const {win} = fair.calculateWin(serverSeed, clientSeed);
   
-  // Списываем ставку
   user.balance -= betAmount;
-  
-  // Начисляем выигрыш
   const prize = win ? betAmount * 1.9 : 0;
   user.balance += prize;
-  
   await user.save();
   
-  // Реферальные от игры (1% от ставки)
+  // Реферальные 1% от ставки
   if (user.ref) {
     const ref1 = await User.findOne({uid: user.ref});
     if (ref1) {
@@ -112,7 +104,7 @@ app.post('/play/coin', async (req, res) => {
   });
 });
 
-// Вебхук для депозитов и ставок
+// Webhook для депозитов
 app.post('/webhook', async (req, res) => {
   const {update} = req.body;
   if (update?.type !== 'invoice_paid') return res.sendStatus(200);
@@ -128,7 +120,7 @@ app.post('/webhook', async (req, res) => {
       {upsert: true, new: true}
     );
     
-    // Реферальные от депозита (5% + 2%)
+    // Реферальные: 5% + 2%
     if (inv.refCode && inv.refCode !== inv.uid) {
       const ref1 = await User.findOne({uid: inv.refCode});
       if (ref1) {
@@ -152,11 +144,10 @@ app.post('/webhook', async (req, res) => {
   
   inv.status = 'paid';
   await inv.save();
-  
   res.sendStatus(200);
 });
 
-// Получить данные пользователя
+// Данные пользователя
 app.get('/user/:uid', async (req, res) => {
   const u = await User.findOneAndUpdate(
     {uid: +req.params.uid},
@@ -171,18 +162,6 @@ app.get('/user/:uid', async (req, res) => {
     lastBonus: u.lastBonus,
     totalDeposited: u.totalDeposited
   });
-});
-
-// Обновить бонус
-app.post('/bonus', async (req, res) => {
-  const {uid, now} = req.body;
-  await User.updateOne({uid}, {lastBonus: now});
-  res.sendStatus(200);
-});
-
-// Устаревший роут (на всякий случай)
-app.post('/play', async (req, res) => {
-  res.status(410).json({error: 'Deprecated. Use /deposit or /play/coin'});
 });
 
 const PORT = process.env.PORT || 3000;
