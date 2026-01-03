@@ -7,7 +7,8 @@ const user = new mongoose.Schema({
   ref: Number,
   ref2: Number,
   lastBonus: Number,
-  totalDeposited: {type: Number, default: 0}
+  totalDeposited: {type: Number, default: 0},
+  lastCheckUrl: String // храним готовую ссылку
 }, {versionKey: false});
 
 const invoice = new mongoose.Schema({
