@@ -7,9 +7,32 @@ const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const app = express();
 
-// ===== НАСТРОЙКА БЕЗОПАСНОСТИ =====
-app.use(helmet());
-app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(',') || '*', credentials: true }));
+// ===== НАСТРОЙКА CORS (ВАЖНО!) =====
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()) || ['https://miniapp-sigma-roan.vercel.app', 'http://localhost:3000'];
+
+app.use(helmet({
+    crossOriginEmbedderPolicy: false, // Важно для Telegram WebApp
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+// Обрабатываем CORS для ВСЕХ запросов
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (ALLOWED_ORIGINS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Bot-Token');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    
+    // Обрабатываем OPTIONS запрос (preflight)
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // ===== RATE LIMITING =====
@@ -34,8 +57,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID || '0');
 
 console.log('[i] CRYPTO_TOKEN:', CRYPTO_TOKEN ? 'SET ✓' : 'NOT SET ✗');
+console.log('[i] ALLOWED_ORIGINS:', ALLOWED_ORIGINS);
 console.log('[i] SERVER_URL:', SERVER_URL);
-console.log('[i] ADMIN_ID:', ADMIN_ID);
 
 // ===== РОУТЫ =====
 app.use('/', require('./routes/slots'));
@@ -48,7 +71,7 @@ app.get('/', (req, res) => res.json({
     success: true, 
     service: 'SPIND BET API',
     crypto: CRYPTO_TOKEN ? 'configured' : 'missing',
-    server: SERVER_URL,
+    cors: ALLOWED_ORIGINS,
     timestamp: new Date().toISOString()
 }));
 
@@ -57,6 +80,7 @@ app.get('/health', (req, res) => res.status(200).json({
     status: 'healthy',
     crypto: !!CRYPTO_TOKEN,
     db: mongoose.connection.readyState === 1,
+    cors: ALLOWED_ORIGINS,
     timestamp: new Date().toISOString()
 }));
 
@@ -74,14 +98,13 @@ app.post('/user/register', async (req, res) => {
             { upsert: true, new: true, runValidators: true }
         );
         
-        // Обработка реферала
         if (refCode && !user.ref && refCode !== uid) {
             const refUser = await User.findOne({ uid: refCode });
             if (refUser) {
                 user.ref = refCode;
                 if (refUser.ref && refUser.ref !== uid) user.ref2 = refUser.ref;
                 await user.save();
-                console.log(`[REGISTER] Referral: ${refCode} -> ${uid}`);
+                console.log(`[REGISTER] Referral: ${refCode} → ${uid}`);
             }
         }
         
@@ -97,17 +120,13 @@ app.post('/deposit', async (req, res) => {
     try {
         const { uid, amount, refCode } = req.body;
         
-        console.log(`[DEPOSIT REQUEST] UID: ${uid}, Amount: ${amount} USDT`);
+        console.log(`[DEPOSIT] UID: ${uid}, Amount: ${amount} USDT`);
         
-        // Валидация
-        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        if (!amount || amount < 0.01) return res.status(400).json({ success: false, error: 'Minimum deposit: 0.01 USDT' });
-        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable (no token)' });
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
+        if (!amount || amount < 0.01) return res.status(400).json({ success: false, error: 'Minimum: 0.01 USDT' });
+        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable' });
         
-        // Создание инвойса в Crypto Bot
         const payload = JSON.stringify({ uid, refCode, timestamp: Date.now() });
-        
-        console.log(`[DEPOSIT] Creating Crypto Bot invoice for ${amount} USDT...`);
         
         const { data } = await axios.post(
             'https://pay.crypt.bot/api/createInvoice',
@@ -116,22 +135,13 @@ app.post('/deposit', async (req, res) => {
                 amount: String(amount),
                 description: `SPIND BET Deposit: ${amount} USDT`,
                 payload: payload,
-                expires_in: 3600 // 1 час
+                expires_in: 3600
             },
-            {
-                headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN }
-            }
+            { headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN } }
         );
         
-        // Проверка ответа
-        if (!data.ok) {
-            console.error('[DEPOSIT ERROR] Crypto Bot response:', data.error);
-            throw new Error(data.error?.description || `Crypto Bot API error: ${JSON.stringify(data.error)}`);
-        }
+        if (!data.ok) throw new Error(data.error?.description || 'Invoice creation failed');
         
-        console.log('[DEPOSIT SUCCESS] Invoice ID:', data.result.invoice_id);
-        
-        // Сохранение в базу
         await Invoice.create({
             iid: data.result.invoice_id,
             uid,
@@ -141,22 +151,21 @@ app.post('/deposit', async (req, res) => {
             status: 'pending',
             payload: payload,
             createdAt: new Date(),
-            expiresAt: new Date(Date.now() + 3600000) // 1 час
+            expiresAt: new Date(Date.now() + 3600000)
         });
         
         res.json({
             success: true,
             invoiceUrl: data.result.pay_url,
             invoiceId: data.result.invoice_id,
-            amount: amount,
-            message: 'Invoice created successfully'
+            amount
         });
         
     } catch (error) {
         console.error('[DEPOSIT ERROR]', error.response?.data || error.message);
         res.status(500).json({ 
             success: false,
-            error: error.response?.data?.error?.description || error.message || 'Failed to create invoice'
+            error: error.response?.data?.error?.description || error.message
         });
     }
 });
@@ -167,21 +176,15 @@ app.post('/check-deposit', async (req, res) => {
         const { invoiceId } = req.body;
         if (!invoiceId) return res.status(400).json({ success: false, error: 'Invoice ID required' });
         
-        console.log(`[CHECK DEPOSIT] Invoice: ${invoiceId}`);
+        console.log(`[CHECK] Invoice: ${invoiceId}`);
         
         const invoice = await Invoice.findOne({ iid: invoiceId });
-        if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found in DB' });
+        if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found' });
         
         if (invoice.status === 'paid') {
-            return res.json({ 
-                success: true,
-                status: 'paid', 
-                amount: invoice.amount, 
-                message: 'Already credited'
-            });
+            return res.json({ success: true, status: 'paid', amount: invoice.amount, message: 'Already credited' });
         }
         
-        // Проверяем в Crypto Bot
         const { data } = await axios.get(
             'https://pay.crypt.bot/api/getInvoices',
             {
@@ -190,22 +193,10 @@ app.post('/check-deposit', async (req, res) => {
             }
         );
         
-        if (!data.ok) {
-            console.error('[CHECK ERROR] Crypto Bot check failed:', data.error);
-            throw new Error(data.error?.description || 'Failed to check invoice');
-        }
-        
         const invoiceData = data.result.items[0];
-        if (!invoiceData) {
-            return res.status(404).json({ success: false, error: 'Invoice not found in Crypto Bot' });
-        }
-        
-        console.log(`[CHECK DEPOSIT] Status: ${invoiceData.status}`);
+        if (!invoiceData) return res.status(404).json({ success: false, error: 'Invoice not found in Crypto Bot' });
         
         if (invoiceData.status === 'paid' && invoice.status !== 'paid') {
-            console.log('[CHECK DEPOSIT] Processing payment...');
-            
-            // Обрабатываем платеж в транзакции
             const session = await mongoose.startSession();
             try {
                 await session.withTransaction(async () => {
@@ -215,7 +206,6 @@ app.post('/check-deposit', async (req, res) => {
                         { upsert: true, new: true, session }
                     );
                     
-                    // Реферальные бонусы
                     if (invoice.refCode && invoice.refCode !== invoice.uid) {
                         const ref1 = await User.findOne({ uid: invoice.refCode }).session(session);
                         if (ref1) {
@@ -223,7 +213,6 @@ app.post('/check-deposit', async (req, res) => {
                             ref1.balance += refBonus;
                             ref1.refEarn += refBonus;
                             await ref1.save({ session });
-                            console.log(`[REF] Level 1 bonus: ${refBonus} to ${ref1.uid}`);
                             
                             if (ref1.ref && ref1.ref !== invoice.uid) {
                                 const ref2 = await User.findOne({ uid: ref1.ref }).session(session);
@@ -232,73 +221,54 @@ app.post('/check-deposit', async (req, res) => {
                                     ref2.balance += ref2Bonus;
                                     ref2.refEarn += ref2Bonus;
                                     await ref2.save({ session });
-                                    console.log(`[REF] Level 2 bonus: ${ref2Bonus} to ${ref2.uid}`);
                                 }
                             }
                         }
                     }
                     
-                    // Обновляем инвойс
                     invoice.status = 'paid';
                     invoice.paidAt = new Date();
                     await invoice.save({ session });
-                    
-                    console.log(`[DEPOSIT SUCCESS] User ${invoice.uid} credited ${invoice.amount} USDT`);
                 });
-                
                 await session.endSession();
                 
-                res.json({
-                    success: true,
-                    status: 'paid',
-                    amount: invoice.amount,
-                    newBalance: (await User.findOne({ uid: invoice.uid })).balance,
-                    message: 'Payment credited successfully'
-                });
-                
+                const user = await User.findOne({ uid: invoice.uid });
+                res.json({ success: true, status: 'paid', amount: invoice.amount, newBalance: user.balance });
             } catch (error) {
                 await session.endSession();
                 throw error;
             }
         } else {
-            // Обновляем статус если изменился
             if (invoiceData.status !== invoice.status) {
                 invoice.status = invoiceData.status;
                 await invoice.save();
             }
-            
-            res.json({ success: true, status: invoiceData.status, message: `Invoice ${invoiceData.status}` });
+            res.json({ success: true, status: invoiceData.status });
         }
         
     } catch (error) {
-        console.error('[CHECK DEPOSIT ERROR]', error);
-        res.status(500).json({ 
-            success: false,
-            error: error.response?.data?.error?.description || error.message
-        });
+        console.error('[CHECK ERROR]', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ===== ВЫВОД ЧЕКОМ =====
+// ===== ВЫВОД =====
 app.post('/withdraw', async (req, res) => {
     try {
         const { uid, amount } = req.body;
         
-        console.log(`[WITHDRAW REQUEST] UID: ${uid}, Amount: ${amount} USDT`);
+        console.log(`[WITHDRAW] UID: ${uid}, Amount: ${amount} USDT`);
         
-        // Валидация
-        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        if (!amount || amount < 0.2) return res.status(400).json({ success: false, error: 'Minimum withdrawal: 0.20 USDT' });
-        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable (no token)' });
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
+        if (!amount || amount < 0.2) return res.status(400).json({ success: false, error: 'Minimum: 0.20 USDT' });
+        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable' });
         
         const user = await User.findOne({ uid });
         if (!user) return res.status(404).json({ success: false, error: 'User not found' });
         if (user.balance < amount) return res.status(400).json({ success: false, error: 'Insufficient balance' });
         
-        console.log(`[WITHDRAW] Creating check for ${amount} USDT...`);
-        
-        // Создаем чек
         const spendId = `withdraw_${uid}_${Date.now()}`;
+        
         const { data } = await axios.post(
             'https://pay.crypt.bot/api/createCheck',
             {
@@ -308,19 +278,11 @@ app.post('/withdraw', async (req, res) => {
                 description: `SPIND BET Withdrawal for user ${uid}`,
                 payload: spendId
             },
-            {
-                headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN }
-            }
+            { headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN } }
         );
         
-        if (!data.ok) {
-            console.error('[WITHDRAW ERROR] Crypto Bot response:', data.error);
-            throw new Error(data.error?.description || `Crypto Bot API error: ${JSON.stringify(data.error)}`);
-        }
+        if (!data.ok) throw new Error(data.error?.description || 'Check creation failed');
         
-        console.log('[WITHDRAW SUCCESS] Check ID:', data.result.check_id);
-        
-        // Обрабатываем вывод в транзакции
         const session = await mongoose.startSession();
         try {
             await session.withTransaction(async () => {
@@ -339,47 +301,32 @@ app.post('/withdraw', async (req, res) => {
                     paidAt: new Date()
                 }], { session });
             });
-            
             await session.endSession();
             
-            // Уведомляем админа
             if (ADMIN_ID) {
                 axios.post(
                     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
-                    {
-                        chat_id: ADMIN_ID,
-                        text: `📤 WITHDRAWAL\n\nUser: ${uid}\nAmount: ${amount} USDT\n\nCheck: ${data.result.bot_check_url}`
-                    }
+                    { chat_id: ADMIN_ID, text: `📤 Withdrawal: User ${uid} - ${amount} USDT` }
                 ).catch(() => {});
             }
             
-            res.json({
-                success: true,
-                amount,
-                newBalance: user.balance,
-                checkUrl: data.result.bot_check_url,
-                message: 'Withdrawal created successfully'
-            });
-            
+            res.json({ success: true, amount, newBalance: user.balance, checkUrl: data.result.bot_check_url });
         } catch (error) {
             await session.endSession();
             throw error;
         }
         
     } catch (error) {
-        console.error('[WITHDRAW ERROR]', error.response?.data || error.message);
-        res.status(500).json({ 
-            success: false,
-            error: error.response?.data?.error?.description || error.message || 'Withdrawal failed'
-        });
+        console.error('[WITHDRAW ERROR]', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ===== ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ =====
+// ===== ПОЛЬЗОВАТЕЛЬ =====
 app.get('/user/:uid', async (req, res) => {
     try {
         const uid = parseInt(req.params.uid);
-        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid UID' });
         
         const user = await User.findOneAndUpdate(
             { uid }, 
@@ -401,21 +348,7 @@ app.get('/user/:uid', async (req, res) => {
         
     } catch (error) {
         console.error('[USER ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to load user', balance: 0 });
-    }
-});
-
-// ===== ОБНОВЛЕНИЕ БОНУСА =====
-app.post('/bonus', async (req, res) => {
-    try {
-        const { uid, now } = req.body;
-        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
-        
-        await User.updateOne({ uid }, { $set: { lastBonus: now } }, { runValidators: true });
-        res.json({ success: true });
-    } catch (error) {
-        console.error('[BONUS ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to update bonus' });
+        res.status(500).json({ success: false, error: 'Failed to load user' });
     }
 });
 
@@ -426,8 +359,8 @@ app.get('/ref/stats/:uid', async (req, res) => {
         if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid UID' });
         
         const [directRefs, level2Refs, user] = await Promise.all([
-            User.find({ ref: uid }).select('uid totalDeposited balance').lean(),
-            User.find({ ref2: uid }).select('uid totalDeposited balance').lean(),
+            User.find({ ref: uid }).select('uid totalDeposited balance createdAt').lean(),
+            User.find({ ref2: uid }).select('uid totalDeposited balance createdAt').lean(),
             User.findOne({ uid })
         ]);
         
@@ -453,21 +386,31 @@ app.get('/ref/stats/:uid', async (req, res) => {
     }
 });
 
-// ===== ОБРАБОТКА ОШИБОК =====
-app.use((error, req, res, next) => {
-    console.error('[UNHANDLED ERROR]', error);
-    res.status(500).json({ 
-        success: false,
-        error: 'Internal server error',
-        details: error.message
-    });
+// ===== БОНУС =====
+app.post('/bonus', async (req, res) => {
+    try {
+        const { uid, now } = req.body;
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
+        
+        await User.updateOne({ uid }, { $set: { lastBonus: now } }, { runValidators: true });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('[BONUS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to update bonus' });
+    }
 });
 
-// ===== ЗАПУСК СЕРВЕРА =====
+// ===== ОШИБКИ =====
+app.use((error, req, res, next) => {
+    console.error('[UNHANDLED ERROR]', error);
+    res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
+});
+
+// ===== ЗАПУСК =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[✓] SPIND BET Server running on port ${PORT}`);
-    console.log(`[i] Health check: ${SERVER_URL}/health`);
+    console.log(`[✓] Server running on port ${PORT}`);
+    console.log(`[i] CORS allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
 });
 
 module.exports = app;
