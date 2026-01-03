@@ -16,7 +16,6 @@ function getStop() {
   return 0;
 }
 
-// Запуск спина (списываем с баланса)
 router.post('/slots/spin', async (req, res) => {
   const {uid, bet} = req.body;
   const user = await User.findOne({uid});
@@ -32,7 +31,6 @@ router.post('/slots/spin', async (req, res) => {
   res.json({success: true, roundId: round._id, newBalance: user.balance});
 });
 
-// Остановка барабана
 router.get('/slots/stop', async (req, res) => {
   const {roundId, reel} = req.query;
   const r = await SlotRound.findById(roundId);
@@ -45,7 +43,6 @@ router.get('/slots/stop', async (req, res) => {
   res.json({stopRow: r.reels[reel]});
 });
 
-// Результат
 router.get('/slots/win', async (req, res) => {
   const r = await SlotRound.findById(req.query.roundId);
   if (!r || r.finished) return res.json({win: false});
@@ -74,7 +71,6 @@ router.get('/slots/win', async (req, res) => {
     user.balance += total;
     await user.save();
     
-    // Реферальные 1% от выигрыша
     if (user.ref) {
       const ref1 = await User.findOne({uid: user.ref});
       if (ref1) {
