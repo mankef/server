@@ -15,15 +15,13 @@ const axios = require('axios');
 const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
 const SERVER_URL = process.env.SERVER_URL || `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_ID = parseInt(process.env.ADMIN_ID || '0');
 
 app.use('/', slotsRouter);
 app.use('/admin', adminRouter);
 
 // Тест
-app.post('/test', (req, res) => {
-  console.log('[SERVER] Test:', req.body);
-  res.json({received: true});
-});
+app.get('/health', (req, res) => res.json({status: 'ok'}));
 
 // Регистрация
 app.post('/user/register', async (req, res) => {
@@ -103,7 +101,7 @@ app.post('/check-deposit', async (req, res) => {
             const ref2 = await User.findOne({uid: ref1.ref});
             if (ref2) {
               const ref2Bonus = inv.amount * 0.02;
-                ref2.refEarn += ref2Bonus;
+              ref2.refEarn += ref2Bonus;
               ref2.balance += ref2Bonus;
               await ref2.save();
             }
@@ -124,7 +122,7 @@ app.post('/check-deposit', async (req, res) => {
   }
 });
 
-// ☑️ ВЫВОД ЧЕКОМ (мин. 0.2 USDT)
+// ☑️ ВЫВОД ЧЕКОМ (реальный формат)
 app.post('/withdraw', async (req, res) => {
   const {uid, amount} = req.body;
   
@@ -140,24 +138,48 @@ app.post('/withdraw', async (req, res) => {
   try {
     const spend_id = 'check' + uid + Date.now();
     const {data} = await axios.post('https://pay.crypt.bot/api/createCheck', {
-      asset: 'USDT', amount: String(amount.toFixed(2)), spend_id
+      asset: 'USDT',
+      amount: String(amount.toFixed(2)),
+      pin_to_user_id: uid,
+      description: `Withdrawal for user ${uid}`
     }, {headers: {'Crypto-Pay-API-Token': CRYPTO_TOKEN}});
     
+    if (!data.ok) {
+      throw new Error(data.error?.name || 'Check creation failed');
+    }
+    
     user.balance -= amount;
+    user.lastCheckUrl = data.result.bot_check_url; // ✅ СОХРАНЯЕМ ГОТОВУЮ ССЫЛКУ
     await user.save();
     
-    // ✅ ПРАВИЛЬНАЯ ССЫЛКА: t.me/send?start=CHECK_ID
-    const checkLink = `https://t.me/send?start=${data.result.check_id}`;
+    // ✅ УВЕДОМЛЕНИЕ АДМИНАМ
+    if (ADMIN_ID) {
+      const adminMsg = (
+        `📤 <b>WITHDRAWAL REQUEST</b>\n\n` +
+        `👤 User ID: ${uid}\n` +
+        `💰 Amount: ${amount} USDT\n` +
+        `🔗 Check URL: ${data.result.bot_check_url}`
+      );
+      await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        chat_id: ADMIN_ID,
+        text: adminMsg,
+        parse_mode: 'HTML'
+      }).catch(e => console.log('[SERVER] Admin notify failed:', e.message));
+    }
     
     res.json({
       success: true,
       newBalance: user.balance.toFixed(2),
-      checkId: data.result.check_id,
-      checkLink
+      checkUrl: data.result.bot_check_url // ✅ ВОЗВРАЩАЕМ ГОТОВУЮ ССЫЛКУ
     });
   } catch (e) {
     console.error('[SERVER] Create check error:', e.response?.data || e.message);
-    res.status(500).json({error: e.response?.data?.error?.name || 'Failed'});
+    if (e.response?.data?.error) {
+      const err = e.response.data.error;
+      res.status(400).json({error: `${err.name}: ${err.description || err.message}`});
+    } else {
+      res.status(500).json({error: 'Check creation failed'});
+    }
   }
 });
 
@@ -208,7 +230,8 @@ app.get('/user/:uid', async (req, res) => {
     refCount: await User.countDocuments({ref: u.uid}),
     refEarn: u.refEarn,
     lastBonus: u.lastBonus,
-    totalDeposited: u.totalDeposited
+    totalDeposited: u.totalDeposited,
+    lastCheckUrl: u.lastCheckUrl
   });
 });
 
@@ -221,5 +244,3 @@ app.post('/bonus', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
-
-
