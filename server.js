@@ -7,7 +7,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const app = express();
 
-// ===== КРИТИЧЕСКИЙ ФИКС CORS =====
+// ===== КРИТИЧЕСКИЙ CORS FIX =====
 const ALLOWED_ORIGINS = [
     'https://miniapp-sigma-roan.vercel.app',
     'https://server-production-b3d5.up.railway.app',
@@ -15,7 +15,7 @@ const ALLOWED_ORIGINS = [
     'https://localhost:3000'
 ];
 
-// Устанавливаем CORS ДО всех обработчиков
+// Устанавливаем CORS заголовки ДО всех роутов
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (ALLOWED_ORIGINS.includes(origin)) {
@@ -24,8 +24,9 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Bot-Token');
+    res.setHeader('Access-Control-Max-Age', '86400');
     
-    // Обрабатываем OPTIONS preflight запрос
+    // Обрабатываем preflight OPTIONS запрос
     if (req.method === 'OPTIONS') {
         return res.status(200).end();
     }
@@ -58,7 +59,7 @@ mongoose.connect(process.env.MONGO_URI, {
 });
 
 // ===== МОДЕЛИ =====
-const { User, Invoice } = require('./models');
+const { User, Invoice, Settings, SlotRound, CoinflipGame } = require('./models');
 
 // ===== КОНФИГУРАЦИЯ =====
 const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
@@ -67,24 +68,59 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID || '0');
 
 console.log('[i] CRYPTO_TOKEN:', CRYPTO_TOKEN ? 'SET ✓' : 'NOT SET ✗');
-console.log('[i] ALLOWED_ORIGINS:', ALLOWED_ORIGINS);
+console.log('[i] ALLOWED_ORIGINS:', ALLOWED_ORIGINS.join(', '));
+console.log('[i] SERVER_URL:', SERVER_URL);
+
+// ===== РОУТЫ =====
+app.use('/', require('./routes/slots'));
+app.use('/admin', require('./routes/admin'));
+app.use('/coinflip', require('./routes/coinflip'));
 
 // ===== КОРНЕВЫЕ ЭНДПОИНТЫ =====
-app.get('/', (req, res) => res.json({
-    success: true,
+app.get('/', (req, res) => res.json({ 
+    success: true, 
     service: 'SPIND BET API',
     crypto: CRYPTO_TOKEN ? 'configured' : 'missing',
-    cors: ALLOWED_ORIGINS
+    cors: ALLOWED_ORIGINS,
+    timestamp: new Date().toISOString()
 }));
 
 app.get('/health', (req, res) => res.status(200).json({
     success: true,
     status: 'healthy',
+    crypto: !!CRYPTO_TOKEN,
     db: mongoose.connection.readyState === 1,
-    crypto: !!CRYPTO_TOKEN
+    timestamp: new Date().toISOString()
 }));
 
-// ===== ПОЛЬЗОВАТЕЛИ =====
+// ===== СТАТИСТИКА (НЕДОСТАЮЩИЙ РОУТ) =====
+app.get('/stats/global', async (req, res) => {
+    try {
+        const [totalUsers, totalDeposited, totalWithdrawn, activeUsers] = await Promise.all([
+            User.countDocuments(),
+            User.aggregate([{ $group: { _id: null, total: { $sum: '$totalDeposited' } } }]),
+            User.aggregate([{ $group: { _id: null, total: { $sum: '$totalWithdrawn' } } }]),
+            User.countDocuments({ lastBonus: { $gt: Date.now() - 24 * 60 * 60 * 1000 } })
+        ]);
+
+        res.json({
+            success: true,
+            stats: {
+                users: { total: totalUsers, active24h: activeUsers },
+                financial: {
+                    totalDeposited: totalDeposited[0]?.total || 0,
+                    totalWithdrawn: totalWithdrawn[0]?.total || 0,
+                    houseProfit: (totalDeposited[0]?.total || 0) - (totalWithdrawn[0]?.total || 0)
+                }
+            }
+        });
+    } catch (error) {
+        console.error('[STATS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to load global stats' });
+    }
+});
+
+// ===== РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ =====
 app.post('/user/register', async (req, res) => {
     try {
         const { uid, refCode } = req.body;
@@ -114,6 +150,7 @@ app.post('/user/register', async (req, res) => {
     }
 });
 
+// ===== ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ =====
 app.get('/user/:uid', async (req, res) => {
     try {
         const uid = parseInt(req.params.uid);
@@ -142,7 +179,7 @@ app.get('/user/:uid', async (req, res) => {
     }
 });
 
-// ===== ДЕПОЗИТЫ =====
+// ===== ДЕПОЗИТ =====
 app.post('/deposit', async (req, res) => {
     try {
         const { uid, amount, refCode } = req.body;
@@ -196,13 +233,13 @@ app.post('/deposit', async (req, res) => {
     }
 });
 
-// ===== ПРОВЕРКА ДЕПОЗИТА =====
+// ===== ПРОВЕРКА ДЕПОЗИТА (FIXED) =====
 app.post('/check-deposit', async (req, res) => {
     try {
         const { invoiceId } = req.body;
         if (!invoiceId) return res.status(400).json({ success: false, error: 'Invoice ID required' });
         
-        console.log(`[CHECK] Invoice: ${invoiceId}`);
+        console.log(`[CHECK DEPOSIT] Invoice: ${invoiceId}`);
         
         const invoice = await Invoice.findOne({ iid: invoiceId });
         if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found' });
@@ -211,6 +248,7 @@ app.post('/check-deposit', async (req, res) => {
             return res.json({ success: true, status: 'paid', amount: invoice.amount, message: 'Already credited' });
         }
         
+        // Проверяем в Crypto Bot
         const { data } = await axios.get(
             'https://pay.crypt.bot/api/getInvoices',
             {
@@ -222,7 +260,13 @@ app.post('/check-deposit', async (req, res) => {
         const invoiceData = data.result.items[0];
         if (!invoiceData) return res.status(404).json({ success: false, error: 'Invoice not found in Crypto Bot' });
         
-        if (invoiceData.status === 'paid' && invoice.status !== 'paid') {
+        // ✅ FIX: Крапiva Bot возвращает 'active' вместо 'pending'
+        let status = invoiceData.status;
+        if (status === 'active') status = 'pending';
+        
+        console.log(`[CHECK DEPOSIT] Status: ${status}`);
+        
+        if (status === 'paid' && invoice.status !== 'paid') {
             const session = await mongoose.startSession();
             try {
                 await session.withTransaction(async () => {
@@ -232,6 +276,7 @@ app.post('/check-deposit', async (req, res) => {
                         { upsert: true, new: true, session }
                     );
                     
+                    // Реферальные бонусы
                     if (invoice.refCode && invoice.refCode !== invoice.uid) {
                         const ref1 = await User.findOne({ uid: invoice.refCode }).session(session);
                         if (ref1) {
@@ -239,16 +284,6 @@ app.post('/check-deposit', async (req, res) => {
                             ref1.balance += refBonus;
                             ref1.refEarn += refBonus;
                             await ref1.save({ session });
-                            
-                            if (ref1.ref && ref1.ref !== invoice.uid) {
-                                const ref2 = await User.findOne({ uid: ref1.ref }).session(session);
-                                if (ref2) {
-                                    const ref2Bonus = invoice.amount * 0.02;
-                                    ref2.balance += ref2Bonus;
-                                    ref2.refEarn += ref2Bonus;
-                                    await ref2.save({ session });
-                                }
-                            }
                         }
                     }
                     
@@ -265,15 +300,17 @@ app.post('/check-deposit', async (req, res) => {
                 throw error;
             }
         } else {
-            if (invoiceData.status !== invoice.status) {
-                invoice.status = invoiceData.status;
+            // Обновляем статус если изменился
+            if (status !== invoice.status) {
+                invoice.status = status;
                 await invoice.save();
             }
-            res.json({ success: true, status: invoiceData.status });
+            
+            res.json({ success: true, status: status });
         }
         
     } catch (error) {
-        console.error('[CHECK ERROR]', error);
+        console.error('[CHECK DEPOSIT ERROR]', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -396,13 +433,13 @@ app.post('/bonus', async (req, res) => {
     }
 });
 
-// ===== ОШИБКИ =====
+// ===== НЕОБРАБОТАННЫЕ ОШИБКИ =====
 app.use((error, req, res, next) => {
     console.error('[UNHANDLED ERROR]', error);
-    res.status(500).json({ success: false, error: 'Internal error', details: error.message });
+    res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
 });
 
-// ===== ЗАПУСК =====
+// ===== ЗАПУСК СЕРВЕРА =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[✓] Server running on port ${PORT}`);
