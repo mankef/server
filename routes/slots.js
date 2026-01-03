@@ -1,19 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const { SlotRound, User } = require('../models');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+const { User, SlotRound } = require('../models');
 
-const SYMBOLS = ['🍒', '🍋', '🔔', 'BAR', '💎'];
+const SYMBOLS = ['🍒', '🍋', '🔔', '⭐', '💎'];
 const WEIGHTS = [40, 30, 15, 10, 5];
 const PAYTABLE = {
-    '💎-💎-💎': 50,
-    'BAR-BAR-BAR': 15,
-    '🔔-🔔-🔔': 8,
-    '🍋-🍋-🍋': 4,
-    '🍒-🍒-🍒': 2
+    '💎-💎-💎': { payout: 50, name: 'Diamond Jackpot' },
+    '⭐-⭐-⭐': { payout: 15, name: 'Star Win' },
+    '🔔-🔔-🔔': { payout: 8, name: 'Bell Win' },
+    '🍋-🍋-🍋': { payout: 4, name: 'Lemon Win' },
+    '🍒-🍒-🍒': { payout: 2, name: 'Cherry Win' }
 };
 
-// Получить случайную остановку
 function getStop() {
     const r = Math.random() * 100;
     let acc = 0;
@@ -24,142 +24,120 @@ function getStop() {
     return 0;
 }
 
-// Начать спин
-router.post('/slots/spin', async (req, res) => {
+// Start spin
+router.post('/spin', async (req, res) => {
     const session = await mongoose.startSession();
     
     try {
-        await session.withTransaction(async () => {
-            const { uid, bet } = req.body;
-            
-            // Валидация
-            if (!uid || typeof uid !== 'number') {
-                throw new Error('Invalid user ID');
-            }
-            if (!bet || bet < 0.01) {
-                throw new Error('Minimum bet is 0.01');
-            }
-            
-            const user = await User.findOne({ uid }).session(session);
-            if (!user || user.balance < bet) {
-                throw new Error('Insufficient balance');
-            }
-            
-            // Списать ставку
-            user.balance -= bet;
-            await user.save({ session });
-            
-            // Создать раунд
-            const round = await SlotRound.create([{
-                uid,
-                bet,
-                reels: [],
-                status: 'active'
-            }], { session });
-            
-            res.json({
-                success: true,
-                roundId: round[0]._id.toString(),
-                newBalance: user.balance,
-                message: 'Spin started'
-            });
+        const { uid, bet } = req.body;
+        
+        if (!uid || typeof uid !== 'number') {
+            return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        }
+        if (!bet || bet < 0.01) {
+            return res.status(400).json({ success: false, error: 'Minimum bet is 0.01 USDT' });
+        }
+        
+        const user = await User.findOne({ uid }).session(session);
+        if (!user || user.balance < bet) {
+            return res.status(400).json({ success: false, error: 'Insufficient balance' });
+        }
+        
+        user.balance -= bet;
+        await user.save({ session });
+        
+        const serverSeed = crypto.randomBytes(32).toString('hex');
+        
+        const round = await SlotRound.create([{
+            uid,
+            bet,
+            serverSeed,
+            serverHash: crypto.createHash('sha256').update(serverSeed).digest('hex'),
+            clientSeed: null,
+            reels: [],
+            win: 0,
+            finished: false
+        }], { session });
+        
+        await session.commitTransaction();
+        await session.endSession();
+        
+        res.json({
+            success: true,
+            roundId: round[0]._id.toString(),
+            balance: user.balance,
+            message: 'Spin started'
         });
         
     } catch (error) {
-        res.status(400).json({ 
-            success: false, 
-            error: error.message 
-        });
-    } finally {
+        await session.abortTransaction();
         await session.endSession();
+        
+        console.error('[SPIND BET] Spin error:', error);
+        res.status(500).json({ success: false, error: 'Failed to start spin' });
     }
 });
 
-// Остановить барабан
-router.get('/slots/stop', async (req, res) => {
+// Stop reels
+router.get('/stop', async (req, res) => {
     try {
-        const { roundId, reel } = req.query;
+        const { roundId, reel, clientSeed } = req.query;
         
         if (!roundId || !mongoose.Types.ObjectId.isValid(roundId)) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid round ID' 
-            });
-        }
-        
-        if (!reel || reel < 0 || reel > 2) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid reel number' 
-            });
+            return res.status(400).json({ success: false, error: 'Invalid round ID' });
         }
         
         const round = await SlotRound.findById(roundId);
         if (!round) {
-            return res.status(404).json({ 
-                success: false, 
-                error: 'Round not found' 
-            });
+            return res.status(404).json({ success: false, error: 'Round not found' });
         }
         
-        if (round.status !== 'active') {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Round already finished' 
-            });
+        if (round.finished) {
+            return res.status(400).json({ success: false, error: 'Round already finished' });
         }
         
-        if (!round.reels[reel]) {
-            round.reels[reel] = Array.from({ length: 3 }, () => getStop());
+        if (!round.clientSeed) {
+            round.clientSeed = clientSeed || 'default_seed';
+        }
+        
+        const reelIndex = parseInt(reel);
+        if (!round.reels[reelIndex]) {
+            round.reels[reelIndex] = Array.from({ length: 3 }, () => getStop());
             await round.save();
         }
         
         res.json({
             success: true,
-            stopRow: round.reels[reel],
-            reel: parseInt(reel)
+            stopRow: round.reels[reelIndex],
+            reel: reelIndex
         });
         
     } catch (error) {
         console.error('[SPIND BET] Stop reel error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Failed to stop reel' 
-        });
+        res.status(500).json({ success: false, error: 'Failed to stop reel' });
     }
 });
 
-// Рассчитать выигрыш
-router.get('/slots/win', async (req, res) => {
+// Calculate result
+router.get('/result', async (req, res) => {
     const session = await mongoose.startSession();
     
     try {
         const { roundId } = req.query;
         
         if (!roundId || !mongoose.Types.ObjectId.isValid(roundId)) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Invalid round ID' 
-            });
+            return res.status(400).json({ success: false, error: 'Invalid round ID' });
         }
         
         const round = await SlotRound.findById(roundId).session(session);
-        if (!round || round.status !== 'active') {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Round not found or already finished' 
-            });
+        if (!round || round.finished) {
+            return res.status(400).json({ success: false, error: 'Round not found or finished' });
         }
         
-        // Проверить что все барабаны остановлены
         if (round.reels.length !== 3 || round.reels.some(r => !r || r.length !== 3)) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Not all reels stopped' 
-            });
+            return res.status(400).json({ success: false, error: 'Not all reels stopped' });
         }
         
-        // Построить сетку
         const grid = [];
         for (let reel = 0; reel < 3; reel++) {
             for (let row = 0; row < 3; row++) {
@@ -167,48 +145,42 @@ router.get('/slots/win', async (req, res) => {
             }
         }
         
-        // Проверить линии
         const lines = [
-            [0, 1, 2], // Top
-            [3, 4, 5], // Middle
-            [6, 7, 8], // Bottom
-            [0, 4, 8], // Diagonal 1
-            [2, 4, 6]  // Diagonal 2
+            [0, 1, 2], [3, 4, 5], [6, 7, 8],
+            [0, 4, 8], [2, 4, 6]
         ];
         
         let totalWin = 0;
         const winningLines = [];
         
         lines.forEach((line, index) => {
-            const [a, b, c] = line.map(i => grid[i]);
-            const key = `${a}-${b}-${c}`;
-            const multiplier = PAYTABLE[key];
+            const symbols = line.map(i => grid[i]);
+            const key = symbols.join('-');
             
-            if (multiplier) {
-                const winAmount = round.bet * multiplier;
+            if (PAYTABLE[key]) {
+                const winAmount = round.bet * PAYTABLE[key].payout;
                 totalWin += winAmount;
                 winningLines.push({
                     line: index + 1,
                     symbols: key,
-                    multiplier,
-                    win: winAmount
+                    multiplier: PAYTABLE[key].payout,
+                    win: winAmount,
+                    name: PAYTABLE[key].name
                 });
             }
         });
         
-        // Завершить раунд
         round.win = totalWin;
         round.finished = true;
-        round.status = totalWin > 0 ? 'won' : 'lost';
         await round.save({ session });
         
-        // Выплатить выигрыш
         const user = await User.findOne({ uid: round.uid }).session(session);
+        
         if (totalWin > 0) {
             user.balance += totalWin;
-            await user.save({ session });
+            user.totalWins += 1;
             
-            // Реферальные 1% от выигрыша
+            // Referral bonus from win (1%)
             if (user.ref) {
                 const ref1 = await User.findOne({ uid: user.ref }).session(session);
                 if (ref1) {
@@ -220,6 +192,10 @@ router.get('/slots/win', async (req, res) => {
             }
         }
         
+        user.totalGames += 1;
+        user.totalWagered += round.bet;
+        await user.save({ session });
+        
         await session.commitTransaction();
         await session.endSession();
         
@@ -230,20 +206,16 @@ router.get('/slots/win', async (req, res) => {
             multiplier: totalWin / round.bet,
             winningLines,
             newBalance: user.balance,
-            message: totalWin > 0 ? 
-                `🎉 Won ${totalWin.toFixed(2)} USDT!` : 
-                '❌ No win this time'
+            message: totalWin > 0 ? '🎉 WIN!' : 'Try again',
+            serverSeed: round.serverSeed
         });
         
     } catch (error) {
         await session.abortTransaction();
         await session.endSession();
         
-        console.error('[SPIND BET] Calculate win error:', error);
-        res.status(500).json({ 
-            success: false, 
-            error: 'Failed to calculate win' 
-        });
+        console.error('[SPIND BET] Result error:', error);
+        res.status(500).json({ success: false, error: 'Failed to calculate result' });
     }
 });
 
