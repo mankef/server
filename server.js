@@ -717,3 +717,59 @@ app.get('/ref/stats/:uid', async (req, res) => {
             }
         });
     } catch (error) {
+        console.error('[REF STATS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to load referral stats' });
+    }
+});
+
+// ——— АДМИН ———
+app.use(require('express-rate-limit')({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { success: false, error: 'Too many admin requests' }
+}));
+
+app.post('/admin/set-edge', async (req, res) => {
+    try {
+        const { edge } = req.body;
+        const secret = req.headers['x-admin-secret'];
+        if (!secret || secret !== BOT_TOKEN) return res.status(403).json({ success: false, error: 'Access denied' });
+        
+        await Settings.updateOne({}, { houseEdge: edge }, { upsert: true, runValidators: true });
+        res.json({ success: true, houseEdge: edge });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Failed to update house edge' });
+    }
+});
+
+app.get('/admin/stats', async (req, res) => {
+    try {
+        const secret = req.headers['x-admin-secret'];
+        if (!secret || secret !== BOT_TOKEN) return res.status(403).json({ success: false, error: 'Access denied' });
+        
+        const [totalUsers, totalDeposited, topReferrers] = await Promise.all([
+            User.countDocuments(),
+            User.aggregate([{ $group: { _id: null, total: { $sum: '$totalDeposited' } } }]),
+            User.find().sort({ refEarn: -1 }).limit(10).select('uid refEarn').lean()
+        ]);
+        
+        res.json({ success: true, totalUsers, totalDeposited: totalDeposited[0]?.total || 0, topReferrers });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Failed to load statistics' });
+    }
+});
+
+// ===== ОШИБКИ =====
+app.use((error, req, res, next) => {
+    console.error('[UNHANDLED ERROR]', error);
+    res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
+});
+
+// ===== ЗАПУСК =====
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`[✓] Server running on port ${PORT}`);
+    console.log(`[i] All routes mounted (no external imports)`);
+});
+
+module.exports = app;
