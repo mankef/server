@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const { Settings, User } = require('../models');
 
-// Установить house edge (только админ)
 router.post('/set-edge', async (req, res) => {
   const secret = req.headers['x-admin-secret'];
   if (!secret || secret !== process.env.BOT_TOKEN) {
@@ -11,14 +10,13 @@ router.post('/set-edge', async (req, res) => {
   
   const {edge} = req.body;
   if (typeof edge !== 'number' || edge < 0 || edge > 0.3) {
-    return res.status(400).json({error: 'Edge must be 0-0.3 (30%)'});
+    return res.status(400).json({error: 'Edge must be 0-0.3'});
   }
   
   await Settings.updateOne({}, {houseEdge: edge}, {upsert: true});
   res.json({success: true, houseEdge: edge});
 });
 
-// Получить статистику
 router.get('/stats', async (req, res) => {
   const secret = req.headers['x-admin-secret'];
   if (!secret || secret !== process.env.BOT_TOKEN) {
@@ -36,7 +34,6 @@ router.get('/stats', async (req, res) => {
   });
 });
 
-// Поиск пользователя
 router.get('/user/:uid', async (req, res) => {
   const secret = req.headers['x-admin-secret'];
   if (!secret || secret !== process.env.BOT_TOKEN) {
@@ -51,7 +48,8 @@ router.get('/user/:uid', async (req, res) => {
     balance: user.balance,
     refEarn: user.refEarn,
     ref: user.ref,
-    totalDeposited: user.totalDeposited
+    totalDeposited: user.totalDeposited,
+    lastCheckUrl: user.lastCheckUrl
   });
 });
 
