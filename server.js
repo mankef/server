@@ -2,11 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
-
 const app = express();
 
 // ===== КРИТИЧЕСКИЙ CORS FIX =====
@@ -31,13 +27,15 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(helmet({
+// Безопасность
+app.use(require('helmet')({
     crossOriginEmbedderPolicy: false,
     crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 app.use(express.json({ limit: '10mb' }));
 
-app.use(rateLimit({
+// Rate limiting
+app.use(require('express-rate-limit')({
     windowMs: 15 * 60 * 1000,
     max: 1000,
     message: { success: false, error: 'Too many requests' }
@@ -125,31 +123,21 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID || '0');
 
 console.log('[i] CRYPTO_TOKEN:', CRYPTO_TOKEN ? 'SET ✓' : 'NOT SET ✗');
 console.log('[i] SERVER_URL:', SERVER_URL);
-console.log('[i] ALLOWED_ORIGINS:', ALLOWED_ORIGINS.join(', '));
 
 // ===== КОРНЕВЫЕ ЭНДПОИНТЫ =====
 app.get('/', (req, res) => res.json({ 
     success: true, 
     service: 'SPIND BET API',
-    crypto: CRYPTO_TOKEN ? 'configured' : 'missing',
-    port: PORT,
-    timestamp: new Date().toISOString()
+    crypto: CRYPTO_TOKEN ? 'configured' : 'missing'
 }));
 
 app.get('/health', (req, res) => res.status(200).json({
     success: true,
     status: 'healthy',
-    crypto: !!CRYPTO_TOKEN,
-    db: mongoose.connection.readyState === 1,
-    env: {
-        server_url: SERVER_URL,
-        admin_id: ADMIN_ID,
-        crypto_set: !!CRYPTO_TOKEN
-    },
-    timestamp: new Date().toISOString()
+    db: mongoose.connection.readyState === 1
 }));
 
-// ===== СТАТИСТИКА =====
+// ===== СТАТИСТИКА (НЕДОСТАЮЩИЙ РОУТ) =====
 app.get('/stats/global', async (req, res) => {
     try {
         const [totalUsers, totalDeposited, totalWithdrawn, activeUsers] = await Promise.all([
@@ -276,8 +264,7 @@ app.post('/deposit', async (req, res) => {
         res.json({
             success: true,
             invoiceUrl: data.result.pay_url,
-            invoiceId: data.result.invoice_id,
-            amount
+            invoiceId: data.result.invoice_id
         });
         
     } catch (error) {
@@ -331,7 +318,6 @@ app.post('/check-deposit', async (req, res) => {
                         { upsert: true, new: true, session }
                     );
                     
-                    // Реферальные бонусы
                     if (invoice.refCode && invoice.refCode !== invoice.uid) {
                         const ref1 = await User.findOne({ uid: invoice.refCode }).session(session);
                         if (ref1) {
@@ -432,340 +418,6 @@ app.post('/withdraw', async (req, res) => {
     }
 });
 
-// ===== СЛОТЫ РОУТЫ (ВНУТРИ ФАЙЛА) =====
-const SYMBOLS = ['🍒', '🍋', '🔔', '⭐', '💎'];
-const WEIGHTS = [40, 30, 15, 10, 5];
-const PAYTABLE = {
-    '💎-💎-💎': { payout: 50, name: 'Diamond Jackpot' },
-    '⭐-⭐-⭐': { payout: 15, name: 'Star Win' },
-    '🔔-🔔-🔔': { payout: 8, name: 'Bell Win' },
-    '🍋-🍋-🍋': { payout: 4, name: 'Lemon Win' },
-    '🍒-🍒-🍒': { payout: 2, name: 'Cherry Win' }
-};
-
-function getStop() {
-    const r = Math.random() * 100;
-    let acc = 0;
-    for (let i = 0; i < WEIGHTS.length; i++) {
-        acc += WEIGHTS[i];
-        if (r < acc) return i;
-    }
-    return 0;
-}
-
-app.post('/spin', async (req, res) => {
-    const session = await mongoose.startSession();
-    
-    try {
-        const { uid, bet } = req.body;
-        
-        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
-        if (!bet || bet < 0.01) return res.status(400).json({ success: false, error: 'Minimum bet: 0.01 USDT' });
-        
-        const user = await User.findOne({ uid }).session(session);
-        if (!user || user.balance < bet) return res.status(400).json({ success: false, error: 'Insufficient balance' });
-        
-        user.balance -= bet;
-        await user.save({ session });
-        
-        const serverSeed = crypto.randomBytes(32).toString('hex');
-        const serverHash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-        
-        const round = await SlotRound.create([{
-            uid,
-            bet,
-            serverSeed,
-            serverHash,
-            clientSeed: null,
-            reels: [],
-            win: 0,
-            finished: false
-        }], { session });
-        
-        await session.commitTransaction();
-        await session.endSession();
-        
-        res.json({
-            success: true,
-            roundId: round[0]._id.toString(),
-            balance: user.balance,
-            serverHash: serverHash
-        });
-        
-    } catch (error) {
-        await session.abortTransaction();
-        await session.endSession();
-        
-        console.error('[SPIN ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to start spin' });
-    }
-});
-
-app.get('/stop', async (req, res) => {
-    try {
-        const { roundId, reel, clientSeed } = req.query;
-        
-        if (!roundId || !mongoose.Types.ObjectId.isValid(roundId)) return res.status(400).json({ success: false, error: 'Invalid round ID' });
-        
-        const round = await SlotRound.findById(roundId);
-        if (!round) return res.status(404).json({ success: false, error: 'Round not found' });
-        if (round.finished) return res.status(400).json({ success: false, error: 'Round finished' });
-        
-        const reelIndex = parseInt(reel);
-        if (!round.reels[reelIndex]) {
-            round.reels[reelIndex] = Array.from({ length: 3 }, () => getStop());
-            await round.save();
-        }
-        
-        res.json({
-            success: true,
-            stopRow: round.reels[reelIndex],
-            reel: reelIndex
-        });
-        
-    } catch (error) {
-        console.error('[STOP ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to stop reel' });
-    }
-});
-
-app.get('/result', async (req, res) => {
-    const session = await mongoose.startSession();
-    
-    try {
-        const { roundId } = req.query;
-        
-        if (!roundId || !mongoose.Types.ObjectId.isValid(roundId)) return res.status(400).json({ success: false, error: 'Invalid round ID' });
-        
-        const round = await SlotRound.findById(roundId).session(session);
-        if (!round || round.finished) return res.status(400).json({ success: false, error: 'Round not found or finished' });
-        
-        if (round.reels.length !== 3 || round.reels.some(r => !r || r.length !== 3)) return res.status(400).json({ success: false, error: 'Not all reels stopped' });
-        
-        const grid = [];
-        for (let reel = 0; reel < 3; reel++) {
-            for (let row = 0; row < 3; row++) {
-                grid.push(SYMBOLS[round.reels[reel][row]]);
-            }
-        }
-        
-        const lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 4, 8], [2, 4, 6]];
-        
-        let totalWin = 0;
-        const winningLines = [];
-        
-        lines.forEach((line, index) => {
-            const symbols = line.map(i => grid[i]);
-            const key = symbols.join('-');
-            
-            if (PAYTABLE[key]) {
-                const winAmount = round.bet * PAYTABLE[key].payout;
-                totalWin += winAmount;
-                winningLines.push({
-                    line: index + 1,
-                    symbols: key,
-                    multiplier: PAYTABLE[key].payout,
-                    win: winAmount,
-                    name: PAYTABLE[key].name
-                });
-            }
-        });
-        
-        round.win = totalWin;
-        round.finished = true;
-        await round.save({ session });
-        
-        const user = await User.findOne({ uid: round.uid }).session(session);
-        
-        if (totalWin > 0) {
-            user.balance += totalWin;
-            user.totalWins += 1;
-            
-            if (user.ref) {
-                const ref1 = await User.findOne({ uid: user.ref }).session(session);
-                if (ref1) {
-                    const refBonus = totalWin * 0.01;
-                    ref1.balance += refBonus;
-                    ref1.refEarn += refBonus;
-                    await ref1.save({ session });
-                }
-            }
-        }
-        
-        user.totalGames += 1;
-        user.totalWagered += round.bet;
-        await user.save({ session });
-        
-        await session.commitTransaction();
-        await session.endSession();
-        
-        res.json({
-            success: true,
-            win: totalWin > 0,
-            winAmount: totalWin,
-            multiplier: totalWin / round.bet,
-            winningLines,
-            newBalance: user.balance,
-            serverSeed: round.serverSeed
-        });
-        
-    } catch (error) {
-        await session.abortTransaction();
-        await session.endSession();
-        
-        console.error('[RESULT ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to calculate result' });
-    }
-});
-
-// ===== COINFLIP РОУТЫ (ВНУТРИ ФАЙЛА) =====
-app.post('/coinflip/start', async (req, res) => {
-    const session = await mongoose.startSession();
-    
-    try {
-        const { uid, bet, choice } = req.body;
-        
-        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
-        if (!bet || bet < 0.01) return res.status(400).json({ success: false, error: 'Minimum bet: 0.01 USDT' });
-        if (!['heads', 'tails'].includes(choice)) return res.status(400).json({ success: false, error: 'Choose heads or tails' });
-        
-        const user = await User.findOne({ uid }).session(session);
-        if (!user || user.balance < bet) return res.status(400).json({ success: false, error: 'Insufficient balance' });
-        
-        user.balance -= bet;
-        await user.save({ session });
-        
-        const serverSeed = crypto.randomBytes(32).toString('hex');
-        const serverHash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-        
-        const game = await CoinflipGame.create([{
-            uid,
-            bet,
-            choice,
-            serverSeed,
-            serverHash,
-            clientSeed: null,
-            result: null,
-            win: 0,
-            finished: false
-        }], { session });
-        
-        await session.commitTransaction();
-        await session.endSession();
-        
-        res.json({
-            success: true,
-            gameId: game[0]._id.toString(),
-            balance: user.balance,
-            serverHash: serverHash
-        });
-        
-    } catch (error) {
-        await session.abortTransaction();
-        await session.endSession();
-        
-        console.error('[COINFLIP START ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to start game' });
-    }
-});
-
-app.get('/coinflip/flip', async (req, res) => {
-    try {
-        const { gameId, clientSeed } = req.query;
-        
-        if (!gameId || !mongoose.Types.ObjectId.isValid(gameId)) return res.status(400).json({ success: false, error: 'Invalid game ID' });
-        
-        const game = await CoinflipGame.findById(gameId);
-        if (!game || game.finished) return res.status(400).json({ success: false, error: 'Game not found or finished' });
-        
-        if (!clientSeed) return res.status(400).json({ success: false, error: 'Client seed required' });
-        
-        game.clientSeed = clientSeed;
-        await game.save();
-        
-        const hash = crypto.createHmac('sha256', game.serverSeed).update(clientSeed).digest('hex');
-        const isHeads = parseInt(hash.slice(0, 8), 16) % 2 === 0;
-        
-        res.json({
-            success: true,
-            outcome: isHeads ? 'heads' : 'tails',
-            heads: isHeads,
-            serverSeed: game.serverSeed,
-            verifyHash: game.serverHash
-        });
-        
-    } catch (error) {
-        console.error('[COINFLIP FLIP ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to flip coin' });
-    }
-});
-
-app.get('/coinflip/settle', async (req, res) => {
-    const session = await mongoose.startSession();
-    
-    try {
-        const { gameId } = req.query;
-        
-        if (!gameId || !mongoose.Types.ObjectId.isValid(gameId)) return res.status(400).json({ success: false, error: 'Invalid game ID' });
-        
-        const game = await CoinflipGame.findById(gameId).session(session);
-        if (!game || game.finished) return res.status(400).json({ success: false, error: 'Game not found or finished' });
-        
-        if (!game.clientSeed) return res.status(400).json({ success: false, error: 'Client seed not set' });
-        
-        const hash = crypto.createHmac('sha256', game.serverSeed).update(game.clientSeed).digest('hex');
-        const isHeads = parseInt(hash.slice(0, 8), 16) % 2 === 0;
-        const outcome = isHeads ? 'heads' : 'tails';
-        const win = outcome === game.choice;
-        const winAmount = win ? game.bet * 2 : 0;
-        
-        game.result = outcome;
-        game.win = winAmount;
-        game.finished = true;
-        await game.save({ session });
-        
-        const user = await User.findOne({ uid: game.uid }).session(session);
-        
-        if (win) {
-            user.balance += winAmount;
-            user.totalWins += 1;
-            
-            if (user.ref) {
-                const ref1 = await User.findOne({ uid: user.ref }).session(session);
-                if (ref1) {
-                    const refBonus = winAmount * 0.01;
-                    ref1.balance += refBonus;
-                    ref1.refEarn += refBonus;
-                    await ref1.save({ session });
-                }
-            }
-        }
-        
-        user.totalGames += 1;
-        user.totalWagered += game.bet;
-        await user.save({ session });
-        
-        await session.commitTransaction();
-        await session.endSession();
-        
-        res.json({
-            success: true,
-            win,
-            winAmount,
-            outcome,
-            newBalance: user.balance,
-            serverSeed: game.serverSeed
-        });
-        
-    } catch (error) {
-        await session.abortTransaction();
-        await session.endSession();
-        
-        console.error('[COINFLIP SETTLE ERROR]', error);
-        res.status(500).json({ success: false, error: 'Failed to settle game' });
-    }
-});
-
 // ===== РЕФЕРАЛЬНАЯ СТАТИСТИКА =====
 app.get('/ref/stats/:uid', async (req, res) => {
     try {
@@ -814,8 +466,52 @@ app.post('/bonus', async (req, res) => {
     }
 });
 
+// ===== ПОЛЬЗОВАТЕЛЬСКАЯ СТАТИСТИКА =====
+app.get('/stats/user/:uid', async (req, res) => {
+    try {
+        const uid = parseInt(req.params.uid);
+        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid UID' });
+        
+        const user = await User.findOne({ uid });
+        if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+        
+        const slotsStats = await SlotRound.aggregate([
+            { $match: { uid, finished: true } },
+            { $group: { _id: null, totalWagered: { $sum: '$bet' }, totalWins: { $sum: '$win' } } }
+        ]);
+        
+        const coinflipStats = await CoinflipGame.aggregate([
+            { $match: { uid, finished: true } },
+            { $group: { _id: null, totalWagered: { $sum: '$bet' }, totalWins: { $sum: '$win' }, totalGames: { $sum: 1 } } }
+        ]);
+        
+        res.json({
+            success: true,
+            stats: {
+                balance: user.balance,
+                totalDeposited: user.totalDeposited || 0,
+                totalWithdrawn: user.totalWithdrawn || 0,
+                refEarn: user.refEarn || 0,
+                slots: {
+                    totalWagered: slotsStats[0]?.totalWagered || 0,
+                    totalWins: slotsStats[0]?.totalWins || 0
+                },
+                coinflip: {
+                    totalWagered: coinflipStats[0]?.totalWagered || 0,
+                    totalWins: coinflipStats[0]?.totalWins || 0,
+                    totalGames: coinflipStats[0]?.totalGames || 0
+                }
+            }
+        });
+        
+    } catch (error) {
+        console.error('[USER STATS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to load user statistics' });
+    }
+});
+
 // ===== АДМИН РОУТЫ =====
-const adminLimiter = rateLimit({
+const adminLimiter = require('express-rate-limit')({
     windowMs: 15 * 60 * 1000,
     max: 100,
     message: { success: false, error: 'Too many admin requests' }
@@ -871,12 +567,11 @@ app.use((error, req, res, next) => {
     res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
 });
 
-// ===== ЗАПУСК =====
+// ===== ЗАПУСК СЕРВЕРА =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`[✓] Server running on port ${PORT}`);
     console.log(`[i] CORS enabled for: ${ALLOWED_ORIGINS.join(', ')}`);
-    console.log(`[i] Health check: ${SERVER_URL || `http://localhost:${PORT}`}/health`);
 });
 
 module.exports = app;
