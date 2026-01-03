@@ -4,149 +4,69 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const axios = require('axios');
 const app = express();
 
-// Безопасность
+// ===== НАСТРОЙКА БЕЗОПАСНОСТИ =====
 app.use(helmet());
-app.use(cors({
-    origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
-    credentials: true
-}));
+app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(',') || '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 1000,
-    message: { success: false, error: 'Too many requests' },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
-app.use(limiter);
+// ===== RATE LIMITING =====
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, message: { success: false, error: 'Too many requests' } }));
+app.use('/admin', rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { success: false, error: 'Too many admin requests' } }));
 
-// Admin rate limiting
-const adminLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
-    message: { success: false, error: 'Too many admin requests' },
-});
-app.use('/admin', adminLimiter);
+// ===== ПОДКЛЮЧЕНИЕ К БАЗЕ =====
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+    .then(() => console.log('[✓] MongoDB connected'))
+    .catch(err => {
+        console.error('[✗] MongoDB error:', err.message);
+        process.exit(1);
+    });
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    maxPoolSize: 10,
-})
-.then(() => console.log('[SPIND BET] MongoDB connected'))
-.catch(err => {
-    console.error('[SPIND BET] MongoDB error:', err);
-    process.exit(1);
-});
-
-// Models
+// ===== МОДЕЛИ =====
 const { User, Invoice, Settings, SlotRound, CoinflipGame } = require('./models');
-const fair = require('./utils/fair');
 
-// API Config
+// ===== КОНФИГУРАЦИЯ =====
 const CRYPTO_TOKEN = process.env.CRYPTO_TOKEN;
 const SERVER_URL = process.env.SERVER_URL || `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID || '0');
 
-// Routes
-const slotsRouter = require('./routes/slots');
-const adminRouter = require('./routes/admin');
-const coinflipRouter = require('./routes/coinflip');
-const statsRouter = require('./routes/stats');
+console.log('[i] CRYPTO_TOKEN:', CRYPTO_TOKEN ? 'SET ✓' : 'NOT SET ✗');
+console.log('[i] SERVER_URL:', SERVER_URL);
+console.log('[i] ADMIN_ID:', ADMIN_ID);
 
-app.use('/', slotsRouter);
-app.use('/admin', adminRouter);
-app.use('/coinflip', coinflipRouter);
-app.use('/stats', statsRouter);
+// ===== РОУТЫ =====
+app.use('/', require('./routes/slots'));
+app.use('/admin', require('./routes/admin'));
+app.use('/coinflip', require('./routes/coinflip'));
+app.use('/stats', require('./routes/stats'));
 
-// Root & Health
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'SPIND BET API' }));
-app.get('/health', (req, res) => res.status(200).json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    db: mongoose.connection.readyState === 1
+// ===== КОРНЕВОЙ ЭНДПОИНТ =====
+app.get('/', (req, res) => res.json({ 
+    success: true, 
+    service: 'SPIND BET API',
+    crypto: CRYPTO_TOKEN ? 'configured' : 'missing',
+    server: SERVER_URL,
+    timestamp: new Date().toISOString()
 }));
 
-// Referral stats endpoint
-app.get('/ref/stats/:uid', async (req, res) => {
-    try {
-        const uid = parseInt(req.params.uid);
-        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid UID' });
-        
-        const [directRefs, level2Refs] = await Promise.all([
-            User.find({ ref: uid }).select('uid balance createdAt').lean(),
-            User.find({ ref2: uid }).select('uid balance createdAt').lean()
-        ]);
-        
-        const directDeposits = directRefs.reduce((sum, u) => sum + (u.totalDeposited || 0), 0);
-        const level2Deposits = level2Refs.reduce((sum, u) => sum + (u.totalDeposited || 0), 0);
-        
-        const user = await User.findOne({ uid });
-        
-        res.json({
-            success: true,
-            stats: {
-                directCount: directRefs.length,
-                level2Count: level2Refs.length,
-                totalEarned: user?.refEarn || 0,
-                directDeposits,
-                level2Deposits,
-                directRefs: directRefs.map(r => ({ uid: r.uid, deposited: r.totalDeposited || 0 })),
-                level2Refs: level2Refs.map(r => ({ uid: r.uid, deposited: r.totalDeposited || 0 }))
-            }
-        });
-        
-    } catch (error) {
-        console.error('[SPIND BET] Ref stats error:', error);
-        res.status(500).json({ success: false, error: 'Failed to load referral stats' });
-    }
-});
+app.get('/health', (req, res) => res.status(200).json({
+    success: true,
+    status: 'healthy',
+    crypto: !!CRYPTO_TOKEN,
+    db: mongoose.connection.readyState === 1,
+    timestamp: new Date().toISOString()
+}));
 
-// User endpoints
+// ===== РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ =====
 app.post('/user/register', async (req, res) => {
     try {
         const { uid, refCode } = req.body;
-        if (!uid || typeof uid !== 'number') {
-            return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        }
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
         
-        const user = await User.findOneAndUpdate(
-            { uid }, 
-            {}, 
-            { upset: true, new: true, runValidators: true }
-        );
-        
-        if (refCode && !user.ref && refCode !== uid) {
-            const refUser = await User.findOne({ uid: refCode });
-            if (refUser) {
-                user.ref = refCode;
-                if (refUser.ref && refUser.ref !== uid) {
-                    user.ref2 = refUser.ref;
-                }
-                await user.save();
-            }
-        }
-        
-        res.json({ success: true });
-    } catch (error) {
-        console.error('[SPIND BET] Registration error:', error);
-        res.status(500).json({ success: false, error: 'Registration failed' });
-    }
-});
-
-app.get('/user/:uid', async (req, res) => {
-    try {
-        const uid = parseInt(req.params.uid);
-        if (isNaN(uid)) {
-            return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        }
+        console.log(`[REGISTER] User ${uid}${refCode ? ` ref: ${refCode}` : ''}`);
         
         const user = await User.findOneAndUpdate(
             { uid }, 
@@ -154,43 +74,40 @@ app.get('/user/:uid', async (req, res) => {
             { upsert: true, new: true, runValidators: true }
         );
         
-        const refCount = await User.countDocuments({ ref: uid });
+        // Обработка реферала
+        if (refCode && !user.ref && refCode !== uid) {
+            const refUser = await User.findOne({ uid: refCode });
+            if (refUser) {
+                user.ref = refCode;
+                if (refUser.ref && refUser.ref !== uid) user.ref2 = refUser.ref;
+                await user.save();
+                console.log(`[REGISTER] Referral: ${refCode} -> ${uid}`);
+            }
+        }
         
-        res.json({
-            success: true,
-            balance: Number(user.balance) || 0,
-            refCode: user.uid,
-            refCount,
-            refEarn: Number(user.refEarn) || 0,
-            lastBonus: user.lastBonus || 0,
-            totalDeposited: Number(user.totalDeposited) || 0,
-            lastCheckUrl: user.lastCheckUrl || '',
-            totalGames: user.totalGames || 0,
-            totalWins: user.totalWins || 0,
-            totalWagered: user.totalWagered || 0
-        });
-        
+        res.json({ success: true });
     } catch (error) {
-        console.error('[SPIND BET] Get user error:', error);
-        res.status(500).json({ success: false, error: 'Failed to load user data', balance: 0 });
+        console.error('[REGISTER ERROR]', error);
+        res.status(500).json({ success: false, error: 'Registration failed' });
     }
 });
 
-// Deposit endpoints
+// ===== ДЕПОЗИТ =====
 app.post('/deposit', async (req, res) => {
     try {
         const { uid, amount, refCode } = req.body;
         
-        if (!uid || typeof uid !== 'number') {
-            return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        }
-        if (!amount || amount < 0.01) {
-            return res.status(400).json({ success: false, error: 'Minimum deposit is 0.01 USDT' });
-        }
+        console.log(`[DEPOSIT REQUEST] UID: ${uid}, Amount: ${amount} USDT`);
         
-        if (!CRYPTO_TOKEN) {
-            return res.status(503).json({ success: false, error: 'Payment service unavailable' });
-        }
+        // Валидация
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        if (!amount || amount < 0.01) return res.status(400).json({ success: false, error: 'Minimum deposit: 0.01 USDT' });
+        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable (no token)' });
+        
+        // Создание инвойса в Crypto Bot
+        const payload = JSON.stringify({ uid, refCode, timestamp: Date.now() });
+        
+        console.log(`[DEPOSIT] Creating Crypto Bot invoice for ${amount} USDT...`);
         
         const { data } = await axios.post(
             'https://pay.crypt.bot/api/createInvoice',
@@ -198,16 +115,23 @@ app.post('/deposit', async (req, res) => {
                 asset: 'USDT',
                 amount: String(amount),
                 description: `SPIND BET Deposit: ${amount} USDT`,
-                payload: JSON.stringify({ uid, refCode }),
-                expires_in: 3600
+                payload: payload,
+                expires_in: 3600 // 1 час
             },
-            { headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN } }
+            {
+                headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN }
+            }
         );
         
+        // Проверка ответа
         if (!data.ok) {
-            throw new Error(data.error?.description || 'Invoice creation failed');
+            console.error('[DEPOSIT ERROR] Crypto Bot response:', data.error);
+            throw new Error(data.error?.description || `Crypto Bot API error: ${JSON.stringify(data.error)}`);
         }
         
+        console.log('[DEPOSIT SUCCESS] Invoice ID:', data.result.invoice_id);
+        
+        // Сохранение в базу
         await Invoice.create({
             iid: data.result.invoice_id,
             uid,
@@ -215,46 +139,49 @@ app.post('/deposit', async (req, res) => {
             type: 'deposit',
             refCode,
             status: 'pending',
-            expiresAt: new Date(Date.now() + 3600000)
+            payload: payload,
+            createdAt: new Date(),
+            expiresAt: new Date(Date.now() + 3600000) // 1 час
         });
         
         res.json({
             success: true,
             invoiceUrl: data.result.pay_url,
             invoiceId: data.result.invoice_id,
-            amount
+            amount: amount,
+            message: 'Invoice created successfully'
         });
         
     } catch (error) {
-        console.error('[SPIND BET] Deposit error:', error);
+        console.error('[DEPOSIT ERROR]', error.response?.data || error.message);
         res.status(500).json({ 
             success: false,
-            error: error.response?.data?.error?.description || 'Failed to create invoice'
+            error: error.response?.data?.error?.description || error.message || 'Failed to create invoice'
         });
     }
 });
 
+// ===== ПРОВЕРКА ДЕПОЗИТА =====
 app.post('/check-deposit', async (req, res) => {
     try {
         const { invoiceId } = req.body;
-        if (!invoiceId) {
-            return res.status(400).json({ success: false, error: 'Invoice ID required' });
-        }
+        if (!invoiceId) return res.status(400).json({ success: false, error: 'Invoice ID required' });
+        
+        console.log(`[CHECK DEPOSIT] Invoice: ${invoiceId}`);
         
         const invoice = await Invoice.findOne({ iid: invoiceId });
-        if (!invoice) {
-            return res.status(404).json({ success: false, error: 'Invoice not found' });
-        }
+        if (!invoice) return res.status(404).json({ success: false, error: 'Invoice not found in DB' });
         
         if (invoice.status === 'paid') {
             return res.json({ 
                 success: true,
                 status: 'paid', 
-                amount: invoice.amount,
+                amount: invoice.amount, 
                 message: 'Already credited'
             });
         }
         
+        // Проверяем в Crypto Bot
         const { data } = await axios.get(
             'https://pay.crypt.bot/api/getInvoices',
             {
@@ -263,42 +190,60 @@ app.post('/check-deposit', async (req, res) => {
             }
         );
         
-        const invoiceData = data.result.items[0];
-        if (!invoiceData) {
-            return res.status(404).json({ success: false, error: 'Invoice not found' });
+        if (!data.ok) {
+            console.error('[CHECK ERROR] Crypto Bot check failed:', data.error);
+            throw new Error(data.error?.description || 'Failed to check invoice');
         }
         
-        if (invoiceData.status === 'paid') {
+        const invoiceData = data.result.items[0];
+        if (!invoiceData) {
+            return res.status(404).json({ success: false, error: 'Invoice not found in Crypto Bot' });
+        }
+        
+        console.log(`[CHECK DEPOSIT] Status: ${invoiceData.status}`);
+        
+        if (invoiceData.status === 'paid' && invoice.status !== 'paid') {
+            console.log('[CHECK DEPOSIT] Processing payment...');
+            
+            // Обрабатываем платеж в транзакции
             const session = await mongoose.startSession();
             try {
                 await session.withTransaction(async () => {
                     const user = await User.findOneAndUpdate(
                         { uid: invoice.uid },
                         { $inc: { balance: invoice.amount, totalDeposited: invoice.amount } },
-                        { session }
+                        { upsert: true, new: true, session }
                     );
                     
+                    // Реферальные бонусы
                     if (invoice.refCode && invoice.refCode !== invoice.uid) {
-                        const ref = await User.findOne({ uid: invoice.refCode }).session(session);
-                        if (ref) {
-                            ref.balance += invoice.amount * 0.05;
-                            ref.refEarn += invoice.amount * 0.05;
-                            await ref.save({ session });
+                        const ref1 = await User.findOne({ uid: invoice.refCode }).session(session);
+                        if (ref1) {
+                            const refBonus = invoice.amount * 0.05;
+                            ref1.balance += refBonus;
+                            ref1.refEarn += refBonus;
+                            await ref1.save({ session });
+                            console.log(`[REF] Level 1 bonus: ${refBonus} to ${ref1.uid}`);
                             
-                            if (ref.ref && ref.ref !== invoice.uid) {
-                                const ref2 = await User.findOne({ uid: ref.ref }).session(session);
+                            if (ref1.ref && ref1.ref !== invoice.uid) {
+                                const ref2 = await User.findOne({ uid: ref1.ref }).session(session);
                                 if (ref2) {
-                                    ref2.balance += invoice.amount * 0.02;
-                                    ref2.refEarn += invoice.amount * 0.02;
+                                    const ref2Bonus = invoice.amount * 0.02;
+                                    ref2.balance += ref2Bonus;
+                                    ref2.refEarn += ref2Bonus;
                                     await ref2.save({ session });
+                                    console.log(`[REF] Level 2 bonus: ${ref2Bonus} to ${ref2.uid}`);
                                 }
                             }
                         }
                     }
                     
+                    // Обновляем инвойс
                     invoice.status = 'paid';
                     invoice.paidAt = new Date();
                     await invoice.save({ session });
+                    
+                    console.log(`[DEPOSIT SUCCESS] User ${invoice.uid} credited ${invoice.amount} USDT`);
                 });
                 
                 await session.endSession();
@@ -307,8 +252,8 @@ app.post('/check-deposit', async (req, res) => {
                     success: true,
                     status: 'paid',
                     amount: invoice.amount,
-                    newBalance: user.balance,
-                    message: 'Payment credited'
+                    newBalance: (await User.findOne({ uid: invoice.uid })).balance,
+                    message: 'Payment credited successfully'
                 });
                 
             } catch (error) {
@@ -316,65 +261,71 @@ app.post('/check-deposit', async (req, res) => {
                 throw error;
             }
         } else {
-            invoice.status = invoiceData.status;
-            await invoice.save();
+            // Обновляем статус если изменился
+            if (invoiceData.status !== invoice.status) {
+                invoice.status = invoiceData.status;
+                await invoice.save();
+            }
             
-            res.json({ 
-                success: true,
-                status: invoiceData.status,
-                message: `Invoice ${invoiceData.status}`
-            });
+            res.json({ success: true, status: invoiceData.status, message: `Invoice ${invoiceData.status}` });
         }
         
     } catch (error) {
-        console.error('[SPIND BET] Check deposit error:', error);
+        console.error('[CHECK DEPOSIT ERROR]', error);
         res.status(500).json({ 
             success: false,
-            error: error.response?.data?.error?.description || 'Failed to check invoice'
+            error: error.response?.data?.error?.description || error.message
         });
     }
 });
 
-// Withdraw endpoint
+// ===== ВЫВОД ЧЕКОМ =====
 app.post('/withdraw', async (req, res) => {
     try {
         const { uid, amount } = req.body;
         
-        if (!uid || typeof uid !== 'number') {
-            return res.status(400).json({ success: false, error: 'Invalid user ID' });
-        }
-        if (!amount || amount < 0.2) {
-            return res.status(400).json({ success: false, error: 'Minimum withdrawal is 0.20 USDT' });
-        }
+        console.log(`[WITHDRAW REQUEST] UID: ${uid}, Amount: ${amount} USDT`);
+        
+        // Валидация
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        if (!amount || amount < 0.2) return res.status(400).json({ success: false, error: 'Minimum withdrawal: 0.20 USDT' });
+        if (!CRYPTO_TOKEN) return res.status(503).json({ success: false, error: 'Payment service unavailable (no token)' });
         
         const user = await User.findOne({ uid });
-        if (!user || user.balance < amount) {
-            return res.status(400).json({ success: false, error: 'Insufficient balance' });
-        }
+        if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+        if (user.balance < amount) return res.status(400).json({ success: false, error: 'Insufficient balance' });
         
-        if (!CRYPTO_TOKEN) {
-            return res.status(503).json({ success: false, error: 'Payment service unavailable' });
-        }
+        console.log(`[WITHDRAW] Creating check for ${amount} USDT...`);
         
+        // Создаем чек
+        const spendId = `withdraw_${uid}_${Date.now()}`;
         const { data } = await axios.post(
             'https://pay.crypt.bot/api/createCheck',
             {
                 asset: 'USDT',
                 amount: String(amount.toFixed(2)),
                 pin_to_user_id: uid,
-                description: `SPIND BET Withdrawal for user ${uid}`
+                description: `SPIND BET Withdrawal for user ${uid}`,
+                payload: spendId
             },
-            { headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN } }
+            {
+                headers: { 'Crypto-Pay-API-Token': CRYPTO_TOKEN }
+            }
         );
         
         if (!data.ok) {
-            throw new Error(data.error?.description || 'Check creation failed');
+            console.error('[WITHDRAW ERROR] Crypto Bot response:', data.error);
+            throw new Error(data.error?.description || `Crypto Bot API error: ${JSON.stringify(data.error)}`);
         }
         
+        console.log('[WITHDRAW SUCCESS] Check ID:', data.result.check_id);
+        
+        // Обрабатываем вывод в транзакции
         const session = await mongoose.startSession();
         try {
             await session.withTransaction(async () => {
                 user.balance -= amount;
+                user.totalWithdrawn += amount;
                 user.lastCheckUrl = data.result.bot_check_url;
                 user.lastWithdrawalAt = new Date();
                 await user.save({ session });
@@ -391,12 +342,13 @@ app.post('/withdraw', async (req, res) => {
             
             await session.endSession();
             
+            // Уведомляем админа
             if (ADMIN_ID) {
                 axios.post(
                     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
                     {
                         chat_id: ADMIN_ID,
-                        text: `📤 Withdrawal: User ${uid} - ${amount} USDT`
+                        text: `📤 WITHDRAWAL\n\nUser: ${uid}\nAmount: ${amount} USDT\n\nCheck: ${data.result.bot_check_url}`
                     }
                 ).catch(() => {});
             }
@@ -405,7 +357,8 @@ app.post('/withdraw', async (req, res) => {
                 success: true,
                 amount,
                 newBalance: user.balance,
-                checkUrl: data.result.bot_check_url
+                checkUrl: data.result.bot_check_url,
+                message: 'Withdrawal created successfully'
             });
             
         } catch (error) {
@@ -414,24 +367,107 @@ app.post('/withdraw', async (req, res) => {
         }
         
     } catch (error) {
-        console.error('[SPIND BET] Withdraw error:', error);
+        console.error('[WITHDRAW ERROR]', error.response?.data || error.message);
         res.status(500).json({ 
             success: false,
-            error: error.response?.data?.error?.description || 'Withdrawal failed'
+            error: error.response?.data?.error?.description || error.message || 'Withdrawal failed'
         });
     }
 });
 
-// Error handling
+// ===== ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ =====
+app.get('/user/:uid', async (req, res) => {
+    try {
+        const uid = parseInt(req.params.uid);
+        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid user ID' });
+        
+        const user = await User.findOneAndUpdate(
+            { uid }, 
+            {}, 
+            { upsert: true, new: true, runValidators: true }
+        );
+        
+        res.json({
+            success: true,
+            balance: Number(user.balance) || 0,
+            refCode: user.uid,
+            refCount: await User.countDocuments({ ref: uid }),
+            refEarn: Number(user.refEarn) || 0,
+            lastBonus: user.lastBonus || 0,
+            totalDeposited: Number(user.totalDeposited) || 0,
+            lastCheckUrl: user.lastCheckUrl || '',
+            message: 'User data loaded'
+        });
+        
+    } catch (error) {
+        console.error('[USER ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to load user', balance: 0 });
+    }
+});
+
+// ===== ОБНОВЛЕНИЕ БОНУСА =====
+app.post('/bonus', async (req, res) => {
+    try {
+        const { uid, now } = req.body;
+        if (!uid || typeof uid !== 'number') return res.status(400).json({ success: false, error: 'Invalid UID' });
+        
+        await User.updateOne({ uid }, { $set: { lastBonus: now } }, { runValidators: true });
+        res.json({ success: true });
+    } catch (error) {
+        console.error('[BONUS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to update bonus' });
+    }
+});
+
+// ===== РЕФЕРАЛЬНАЯ СТАТИСТИКА =====
+app.get('/ref/stats/:uid', async (req, res) => {
+    try {
+        const uid = parseInt(req.params.uid);
+        if (isNaN(uid)) return res.status(400).json({ success: false, error: 'Invalid UID' });
+        
+        const [directRefs, level2Refs, user] = await Promise.all([
+            User.find({ ref: uid }).select('uid totalDeposited balance').lean(),
+            User.find({ ref2: uid }).select('uid totalDeposited balance').lean(),
+            User.findOne({ uid })
+        ]);
+        
+        const directDeposits = directRefs.reduce((sum, u) => sum + (u.totalDeposited || 0), 0);
+        const level2Deposits = level2Refs.reduce((sum, u) => sum + (u.totalDeposited || 0), 0);
+        
+        res.json({
+            success: true,
+            stats: {
+                directCount: directRefs.length,
+                level2Count: level2Refs.length,
+                totalEarned: user?.refEarn || 0,
+                directDeposits,
+                level2Deposits,
+                directRefs: directRefs.map(r => ({ uid: r.uid, deposited: r.totalDeposited || 0 })),
+                level2Refs: level2Refs.map(r => ({ uid: r.uid, deposited: r.totalDeposited || 0 }))
+            }
+        });
+        
+    } catch (error) {
+        console.error('[REF STATS ERROR]', error);
+        res.status(500).json({ success: false, error: 'Failed to load referral stats' });
+    }
+});
+
+// ===== ОБРАБОТКА ОШИБОК =====
 app.use((error, req, res, next) => {
-    console.error('[SPIND BET] Unhandled error:', error);
+    console.error('[UNHANDLED ERROR]', error);
     res.status(500).json({ 
         success: false,
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
     });
 });
 
+// ===== ЗАПУСК СЕРВЕРА =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`[SPIND BET] Server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[✓] SPIND BET Server running on port ${PORT}`);
+    console.log(`[i] Health check: ${SERVER_URL}/health`);
 });
+
+module.exports = app;
