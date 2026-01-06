@@ -9,7 +9,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-    origin: ['https://your-domain.vercel.app'], // ЗАМЕНИТЕ на ваш домен
+    origin: ['https://server-production-b3d5.up.railway.app'], // ЗАМЕНИТЕ на ваш домен
     credentials: true
 }));
 app.use(express.json());
@@ -559,6 +559,15 @@ async function cleanupExpiredInvoices() {
 // Запуск сервера
 const PORT = process.env.PORT || 3000;
 
+const mongoUri = process.env.MONGODB_PRIVATE_URL || process.env.MONGODB_URI;
+
+if (!mongoUri) {
+    console.error('❌ MONGODB_URI или MONGODB_PRIVATE_URL не установлены!');
+    process.exit(1);
+}
+
+mongoose.connect(mongoUri, {
+
 mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
@@ -575,3 +584,4 @@ mongoose.connect(process.env.MONGODB_URI, {
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
 });
+
