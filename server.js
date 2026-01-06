@@ -561,12 +561,7 @@ const PORT = process.env.PORT || 3000;
 
 const mongoUri = process.env.MONGODB_PRIVATE_URL || process.env.MONGODB_URI;
 
-if (!mongoUri) {
-    console.error('❌ MONGODB_URI или MONGODB_PRIVATE_URL не установлены!');
-    process.exit(1);
-}
 
-mongoose.connect(mongoUri, {
 
 mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
@@ -584,4 +579,5 @@ mongoose.connect(process.env.MONGODB_URI, {
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
 });
+
 
