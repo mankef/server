@@ -15,12 +15,12 @@ const app = express();
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-    PORT: process.env.PORT || 3000,
+    PORT: process.env.PORT || 8080,
     NODE_ENV: process.env.NODE_ENV || 'development',
-    MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/purple-fortune',
+    MONGODB_URI: process.env.MONGODB_URI || 'mongodb://mongo:pufuVmxEqDyyDnOBIxTsrbHHbSsFJYjf@switchyard.proxy.rlwy.net:44156',
     CRYPTO_BOT_API_KEY: process.env.CRYPTO_BOT_API_KEY,
     CRYPTO_BOT_API_URL: 'https://pay.crypt.bot/api',
-    FRONTEND_URL: process.env.FRONTEND_URL || 'https://server-production-b3d5.up.railway.app',
+    FRONTEND_URL: process.env.FRONTEND_URL || 'https://casinoo33.onrender.com',
     WEBHOOK_SECRET: process.env.WEBHOOK_SECRET || crypto.randomBytes(32).toString('hex'),
     MIN_BET: 1,
     MAX_BET: 50000,
@@ -953,3 +953,4 @@ app.use((req, res) => {
         process.exit(1);
     }
 })();
+
