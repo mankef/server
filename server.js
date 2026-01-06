@@ -15,7 +15,7 @@ const app = express();
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-    PORT: process.env.PORT || 8080,
+    PORT: process.env.PORT || 10000,
     NODE_ENV: process.env.NODE_ENV || 'development',
     MONGODB_URI: process.env.MONGODB_URI || 'mongodb://mongo:pufuVmxEqDyyDnOBIxTsrbHHbSsFJYjf@switchyard.proxy.rlwy.net:44156',
     CRYPTO_BOT_API_KEY: process.env.CRYPTO_BOT_API_KEY,
@@ -953,4 +953,5 @@ app.use((req, res) => {
         process.exit(1);
     }
 })();
+
 
